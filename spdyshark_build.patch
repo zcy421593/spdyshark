@@ -1,0 +1,134 @@
+diff -aur wireshark-1.7.1/CMakeLists.txt wireshark-1.7.1-patched/CMakeLists.txt
+--- wireshark-1.7.1/CMakeLists.txt	2012-04-06 14:42:14.000000000 -0400
++++ wireshark-1.7.1-patched/CMakeLists.txt	2012-04-11 18:37:44.302998000 -0400
+@@ -418,6 +418,7 @@
+ 		plugins/mate
+ 		plugins/opcua
+ 		plugins/profinet
++                plugins/spdyshark
+ 		plugins/stats_tree
+ 		plugins/unistim
+ 		plugins/wimax
+diff -aur wireshark-1.7.1/configure.in wireshark-1.7.1-patched/configure.in
+--- wireshark-1.7.1/configure.in	2012-04-06 14:42:13.000000000 -0400
++++ wireshark-1.7.1-patched/configure.in	2012-04-11 18:37:38.342808000 -0400
+@@ -2084,6 +2084,7 @@
+   plugins/mate/Makefile
+   plugins/opcua/Makefile
+   plugins/profinet/Makefile
++  plugins/spdyshark/Makefile
+   plugins/stats_tree/Makefile
+   plugins/unistim/Makefile
+   plugins/wimax/Makefile
+diff -aur wireshark-1.7.1/epan/Makefile.am wireshark-1.7.1-patched/epan/Makefile.am
+--- wireshark-1.7.1/epan/Makefile.am	2012-04-06 14:42:08.000000000 -0400
++++ wireshark-1.7.1-patched/epan/Makefile.am	2012-04-11 18:38:19.103437000 -0400
+@@ -245,6 +245,7 @@
+ 	../plugins/mgcp/packet-mgcp.c \
+ 	../plugins/rdm/packet-rdm.c \
+ 	../plugins/sercosiii/packet-sercosiii.c \
++	../plugins/spdyshark/packet-spdy.c \
+         ../plugins/wimax/crc.c \
+         ../plugins/wimax/crc_data.c \
+         ../plugins/wimax/mac_hd_generic_decoder.c \
+diff -aur wireshark-1.7.1/epan/Makefile.in wireshark-1.7.1-patched/epan/Makefile.in
+--- wireshark-1.7.1/epan/Makefile.in	2012-04-06 14:42:45.000000000 -0400
++++ wireshark-1.7.1-patched/epan/Makefile.in	2012-04-11 18:41:15.555734000 -0400
+@@ -910,6 +910,7 @@
+ @ENABLE_STATIC_TRUE@@HAVE_PLUGINS_TRUE@	../plugins/mgcp/packet-mgcp.c \
+ @ENABLE_STATIC_TRUE@@HAVE_PLUGINS_TRUE@	../plugins/rdm/packet-rdm.c \
+ @ENABLE_STATIC_TRUE@@HAVE_PLUGINS_TRUE@	../plugins/sercosiii/packet-sercosiii.c \
++@ENABLE_STATIC_TRUE@@HAVE_PLUGINS_TRUE@	../plugins/spdyshark/packet-spdy.c \
+ @ENABLE_STATIC_TRUE@@HAVE_PLUGINS_TRUE@        ../plugins/wimax/crc.c \
+ @ENABLE_STATIC_TRUE@@HAVE_PLUGINS_TRUE@        ../plugins/wimax/crc_data.c \
+ @ENABLE_STATIC_TRUE@@HAVE_PLUGINS_TRUE@        ../plugins/wimax/mac_hd_generic_decoder.c \
+diff -aur wireshark-1.7.1/Makefile.am wireshark-1.7.1-patched/Makefile.am
+--- wireshark-1.7.1/Makefile.am	2012-04-06 14:42:14.000000000 -0400
++++ wireshark-1.7.1-patched/Makefile.am	2012-04-11 18:38:44.343952000 -0400
+@@ -315,6 +315,7 @@
+ 	-dlopen plugins/mate/mate.la \
+ 	-dlopen plugins/opcua/opcua.la \
+ 	-dlopen plugins/profinet/profinet.la \
++	-dlopen plugins/spdyshark/spdy.la \
+ 	-dlopen plugins/stats_tree/stats_tree.la \
+ 	-dlopen plugins/unistim/unistim.la \
+ 	-dlopen plugins/wimax/wimax.la
+diff -aur wireshark-1.7.1/Makefile.in wireshark-1.7.1-patched/Makefile.in
+--- wireshark-1.7.1/Makefile.in	2012-04-06 14:43:02.000000000 -0400
++++ wireshark-1.7.1-patched/Makefile.in	2012-04-11 18:41:24.535515000 -0400
+@@ -142,6 +142,7 @@
+ @HAVE_PLUGINS_TRUE@	plugins/irda/irda.la plugins/m2m/m2m.la \
+ @HAVE_PLUGINS_TRUE@	plugins/mate/mate.la plugins/opcua/opcua.la \
+ @HAVE_PLUGINS_TRUE@	plugins/profinet/profinet.la \
++@HAVE_PLUGINS_TRUE@	plugins/spdyshark/spdy.la \
+ @HAVE_PLUGINS_TRUE@	plugins/stats_tree/stats_tree.la \
+ @HAVE_PLUGINS_TRUE@	plugins/unistim/unistim.la \
+ @HAVE_PLUGINS_TRUE@	plugins/wimax/wimax.la
+@@ -846,6 +847,7 @@
+ @HAVE_PLUGINS_TRUE@	-dlopen plugins/mate/mate.la \
+ @HAVE_PLUGINS_TRUE@	-dlopen plugins/opcua/opcua.la \
+ @HAVE_PLUGINS_TRUE@	-dlopen plugins/profinet/profinet.la \
++@HAVE_PLUGINS_TRUE@	-dlopen plugins/spdyshark/spdy.la \
+ @HAVE_PLUGINS_TRUE@	-dlopen plugins/stats_tree/stats_tree.la \
+ @HAVE_PLUGINS_TRUE@	-dlopen plugins/unistim/unistim.la \
+ @HAVE_PLUGINS_TRUE@	-dlopen plugins/wimax/wimax.la
+diff -aur wireshark-1.7.1/packaging/nsis/Makefile.nmake wireshark-1.7.1-patched/packaging/nsis/Makefile.nmake
+--- wireshark-1.7.1/packaging/nsis/Makefile.nmake	2012-04-06 14:42:12.000000000 -0400
++++ wireshark-1.7.1-patched/packaging/nsis/Makefile.nmake	2012-04-11 18:39:52.262967000 -0400
+@@ -57,6 +57,7 @@
+ 	../../plugins/mate/mate.dll \
+ 	../../plugins/opcua/opcua.dll \
+ 	../../plugins/profinet/profinet.dll \
++	../../plugins/spdyshark/spdy.dll \
+ 	../../plugins/stats_tree/stats_tree.dll \
+ 	../../plugins/unistim/unistim.dll \
+ 	../../plugins/wimax/wimax.dll \
+diff -aur wireshark-1.7.1/packaging/nsis/wireshark.nsi wireshark-1.7.1-patched/packaging/nsis/wireshark.nsi
+--- wireshark-1.7.1/packaging/nsis/wireshark.nsi	2012-04-06 14:42:12.000000000 -0400
++++ wireshark-1.7.1-patched/packaging/nsis/wireshark.nsi	2012-04-11 18:40:30.073897000 -0400
+@@ -928,6 +928,7 @@
+ File "..\..\plugins\m2m\m2m.dll"
+ File "..\..\plugins\opcua\opcua.dll"
+ File "..\..\plugins\profinet\profinet.dll"
++File "..\..\plugins\spdyshark\spdy.dll"
+ File "..\..\plugins\unistim\unistim.dll"
+ File "..\..\plugins\wimax\wimax.dll"
+ File "..\..\plugins\wimaxasncp\wimaxasncp.dll"
+diff -aur wireshark-1.7.1/plugins/Makefile.am wireshark-1.7.1-patched/plugins/Makefile.am
+--- wireshark-1.7.1/plugins/Makefile.am	2012-04-06 14:41:40.000000000 -0400
++++ wireshark-1.7.1-patched/plugins/Makefile.am	2012-04-11 18:40:41.258409000 -0400
+@@ -33,6 +33,7 @@
+ 	mate \
+ 	opcua \
+ 	profinet \
++	spdyshark \
+ 	stats_tree \
+ 	unistim \
+ 	wimax \
+diff -aur wireshark-1.7.1/plugins/Makefile.in wireshark-1.7.1-patched/plugins/Makefile.in
+--- wireshark-1.7.1/plugins/Makefile.in	2012-04-06 14:42:54.000000000 -0400
++++ wireshark-1.7.1-patched/plugins/Makefile.in	2012-04-11 18:41:20.532053000 -0400
+@@ -369,6 +369,7 @@
+ 	mate \
+ 	opcua \
+ 	profinet \
++	spdyshark \
+ 	stats_tree \
+ 	unistim \
+ 	wimax \
+diff -aur wireshark-1.7.1/plugins/Makefile.nmake wireshark-1.7.1-patched/plugins/Makefile.nmake
+--- wireshark-1.7.1/plugins/Makefile.nmake	2012-04-06 14:41:40.000000000 -0400
++++ wireshark-1.7.1-patched/plugins/Makefile.nmake	2012-04-11 18:40:48.221472000 -0400
+@@ -17,6 +17,7 @@
+ 	mate        \
+ 	opcua       \
+ 	profinet    \
++	spdyshark   \
+ 	stats_tree  \
+ 	unistim     \
+ 	wimax       \
+@@ -74,4 +75,3 @@
+ 
+ ####
+ _FORCE_:  ## Assumption: no file named _FORCE_ exists in the current directory
+-
