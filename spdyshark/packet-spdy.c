@@ -183,8 +183,10 @@ static int hf_spdy_flags_fin = -1;
 static int hf_spdy_length = -1;
 static int hf_spdy_header = -1;
 static int hf_spdy_header_name = -1;
+static int hf_spdy_header_name_length = -1;
 static int hf_spdy_header_name_text = -1;
 static int hf_spdy_header_value = -1;
+static int hf_spdy_header_value_length = -1;
 static int hf_spdy_header_value_text = -1;
 static int hf_spdy_streamid = -1;
 static int hf_spdy_associated_streamid = -1;
@@ -1040,7 +1042,7 @@ static guint8* spdy_decompress_header_block(tvbuff_t *tvb,
     if (decomp->adler != dictionary_id) {
       printf("decompressor wants dictionary %#x, but we have %#x\n",
              (guint)decomp->adler, dictionary_id);
-    } else {
+    }/* else*/ {
       retcode = inflateSetDictionary(decomp,
                                      spdy_dictionary,
                                      sizeof(spdy_dictionary));
@@ -1543,14 +1545,10 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
     proto_tree *name_tree;
     proto_tree *value_tree;
     proto_item *header;
-    gint16 length;
+    guint32 length;
     gint header_length = 0;
 
     hoffset = hdr_offset;
-
-    header = proto_tree_add_item(spdy_tree, hf_spdy_header, header_tvb,
-                             hdr_offset, frame_length, FALSE);
-    header_tree = proto_item_add_subtree(header, ett_spdy_header);
 
     length = tvb_get_ntohl(header_tvb, hdr_offset);
     hdr_offset += 4;
@@ -1559,16 +1557,39 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
                                                     length);
     hdr_offset += length;
     header_length += hdr_offset - hoffset;
+
+    /* Add 'Header' subtree. */
+    /* TODO(hkhalil): Move inside if(tree). */
+    header = proto_tree_add_item(spdy_tree, hf_spdy_header, header_tvb,
+                             hdr_offset, header_length, FALSE);
+    header_tree = proto_item_add_subtree(header, ett_spdy_header);
+
     if (tree) {
-      ti = proto_tree_add_text(header_tree, header_tvb, hoffset, length+2,
-                               "Name: %s", header_name);
+      /* Add 'Name' subtree with descriptive text. */
+      ti = proto_tree_add_item(header_tree,
+                               hf_spdy_header_name,
+                               header_tvb,
+                               hoffset,
+                               length + 4,
+                               ENC_NA);
+      proto_item_append_text(ti, ": %s", header_name);
       name_tree = proto_item_add_subtree(ti, ett_spdy_header_name);
-      proto_tree_add_uint(name_tree, hf_spdy_length, header_tvb, hoffset, 2,
-                          length);
-      proto_tree_add_string_format(name_tree, hf_spdy_header_name_text,
-                                   header_tvb, hoffset+2, length,
-                                   header_name, "Text: %s",
-                                   format_text(header_name, length));
+
+      /* Add header name length item. */
+      proto_tree_add_item(name_tree,
+                          hf_spdy_header_name_length,
+                          header_tvb,
+                          hoffset,
+                          4,
+                          ENC_BIG_ENDIAN);
+
+      /* Add header name text item. */
+      proto_tree_add_item(name_tree,
+                          hf_spdy_header_name_text,
+                          header_tvb,
+                          hoffset + 4,
+                          length,
+                          ENC_NA);
     }
 
     hoffset = hdr_offset;
@@ -1580,17 +1601,35 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
     hdr_offset += length;
     header_length += hdr_offset - hoffset;
     if (tree) {
-      ti = proto_tree_add_text(header_tree, header_tvb, hoffset, length+2,
-                               "Value: %s", header_value);
+      /* Add 'Value' subtree with descriptive text. */
+      ti = proto_tree_add_item(header_tree,
+                               hf_spdy_header_value,
+                               header_tvb,
+                               hoffset,
+                               length + 4,
+                               ENC_NA);
+      proto_item_append_text(ti, ": %s", header_value);
       value_tree = proto_item_add_subtree(ti, ett_spdy_header_value);
-      proto_tree_add_uint(value_tree, hf_spdy_length, header_tvb, hoffset, 2,
-                          length);
-      proto_tree_add_string_format(value_tree, hf_spdy_header_value_text,
-                                   header_tvb, hoffset+2, length, header_value,
-                                   "Text: %s",
-                                   format_text(header_value, length));
+
+      /* Add header value length item. */
+      proto_tree_add_item(value_tree,
+                          hf_spdy_header_value_length,
+                          header_tvb,
+                          hoffset,
+                          4,
+                          ENC_BIG_ENDIAN);
+
+      /* Add header value text item */
+      proto_tree_add_item(value_tree,
+                          hf_spdy_header_value_text,
+                          header_tvb,
+                          hoffset + 4,
+                          length,
+                          ENC_NA);
+
+      /* Add description for header subtree. */
+      /* TODO(hkhalil): Move up to where we create the header subtree. */
       proto_item_append_text(header, ": %s: %s", header_name, header_value);
-      proto_item_set_len(header, header_length);
     }
     if (spdy_debug) {
       printf("    %s: %s\n", header_name, header_value);
@@ -1814,6 +1853,12 @@ void proto_register_spdy(void) {
           "", HFILL
       }
     },
+    { &hf_spdy_header_name_length,
+      { "Length",         "spdy.header.name.length",
+          FT_UINT32, BASE_DEC, NULL, 0x0,
+          NULL, HFILL
+      }
+    },
     { &hf_spdy_header_name_text,
       { "Text",           "spdy.header.name.text",
           FT_STRING, BASE_NONE, NULL, 0x0,
@@ -1824,6 +1869,12 @@ void proto_register_spdy(void) {
       { "Value",          "spdy.header.value",
           FT_NONE, BASE_NONE, NULL, 0x0,
           "", HFILL
+      }
+    },
+    { &hf_spdy_header_value_length,
+      { "Length",         "spdy.header.value.length",
+          FT_UINT32, BASE_DEC, NULL, 0x0,
+          NULL, HFILL
       }
     },
     { &hf_spdy_header_value_text,
@@ -1919,58 +1970,4 @@ void proto_reg_handoff_spdy(void) {
   data_handle = find_dissector("data");
   media_handle = find_dissector("media");
   heur_dissector_add("tcp", dissect_spdy_heur, proto_spdy);
-}
-
-static gint proto_message_spdy = -1;
-static gint ett_message_spdy = -1;
-
-static void dissect_message_spdy(tvbuff_t *tvb,
-                                 packet_info *pinfo,
-                                 proto_tree *tree) {
-  proto_tree *subtree;
-  proto_item *ti;
-  gint offset = 0;
-  gint next_offset;
-  gint len;
-
-  col_append_str(pinfo->cinfo, COL_INFO, " (message/spdy)");
-  if (tree) {
-    ti = proto_tree_add_item(tree, proto_message_spdy,
-                             tvb, 0, -1, FALSE);
-    subtree = proto_item_add_subtree(ti, ett_message_spdy);
-    while (tvb_reported_length_remaining(tvb, offset) != 0) {
-      len = tvb_find_line_end(tvb, offset,
-                              tvb_ensure_length_remaining(tvb, offset),
-                              &next_offset, FALSE);
-      if (len == -1) {
-        break;
-      }
-      proto_tree_add_text(subtree, tvb, offset, next_offset - offset,
-                          "%s", tvb_format_text(tvb, offset, len));
-      offset = next_offset;
-    }
-  }
-}
-
-void proto_register_message_spdy(void) {
-  static gint *ett[] = {
-    &ett_message_spdy,
-  };
-
-  proto_message_spdy = proto_register_protocol(
-      "Media Type: message/spdy",
-      "message/spdy",
-      "message-spdy");
-  proto_register_subtree_array(ett, array_length(ett));
-}
-
-void proto_reg_handoff_message_spdy(void) {
-  dissector_handle_t message_spdy_handle;
-
-  message_spdy_handle = create_dissector_handle(dissect_message_spdy,
-                                                proto_message_spdy);
-
-  dissector_add_string("media_type", "message/spdy", message_spdy_handle);
-
-  reinit_spdy();
 }
