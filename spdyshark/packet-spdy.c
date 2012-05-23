@@ -761,7 +761,12 @@ static int dissect_spdy_data_frame(tvbuff_t *tvb, int offset,
                          frame_length);
 
   proto_tree_add_boolean(spdy_tree, hf_spdy_control_bit, tvb, offset, 1, 0);
-  proto_tree_add_uint(spdy_tree, hf_spdy_streamid, tvb, offset, 4, stream_id);
+  proto_tree_add_item(spdy_tree,
+                      hf_spdy_streamid,
+                      tvb,
+                      offset,
+                      4,
+                      ENC_BIG_ENDIAN);
   proto_tree_add_bytes(spdy_tree, hf_spdy_data, tvb, offset + 8, frame_length,
                        "Some Arbitrary Data"); /* TODO(hkhalil): Improve. */
   ti = proto_tree_add_uint_format(spdy_tree, hf_spdy_flags, tvb, offset+4, 1,
@@ -771,8 +776,12 @@ static int dissect_spdy_data_frame(tvbuff_t *tvb, int offset,
   flags_tree = proto_item_add_subtree(ti, ett_spdy_flags);
   proto_tree_add_boolean(flags_tree, hf_spdy_flags_fin, tvb, offset + 4, 1,
                          flags);
-  proto_tree_add_uint(spdy_tree, hf_spdy_length, tvb, offset + 5, 3,
-                      frame_length);
+  proto_tree_add_item(spdy_tree,
+                      hf_spdy_length,
+                      tvb,
+                      offset + 5,
+                      3,
+                      ENC_BIG_ENDIAN);
 
   datalen = tvb_length_remaining(tvb, offset);
   if (datalen > frame_length) {
@@ -1216,7 +1225,6 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
   proto_item          *ti = NULL;
   proto_item          *spdy_proto = NULL;
   int                 orig_offset;
-  int                 hoffset;
   int                 hdr_offset = 0;
   proto_tree          *sub_tree = NULL;
   proto_tree          *flags_tree;
@@ -1347,20 +1355,31 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
 
       /* Populate tree. */
       if (tree) {
+        /* Add control bit. */
         proto_tree_add_bits_item(sub_tree,
                                  hf_spdy_control_bit,
                                  tvb,
                                  orig_offset * 8,
                                  1,
                                  ENC_NA);
+
+        /* Add version. */
         proto_tree_add_bits_item(sub_tree,
                                  hf_spdy_version,
                                  tvb,
                                  orig_offset * 8 + 1,
                                  15,
                                  ENC_BIG_ENDIAN);
-        proto_tree_add_uint(sub_tree, hf_spdy_type, tvb, orig_offset+2, 2,
-                            frame_type);
+
+        /* Add control frame type. */
+        proto_tree_add_item(sub_tree,
+                            hf_spdy_type,
+                            tvb,
+                            orig_offset + 2,
+                            2,
+                            ENC_BIG_ENDIAN);
+
+        /* Add flags. */
         ti = proto_tree_add_uint_format(sub_tree, hf_spdy_flags, tvb,
                                         orig_offset+4, 1, flags,
                                         "Flags: 0x%02x%s", flags,
@@ -1368,15 +1387,40 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
         flags_tree = proto_item_add_subtree(ti, ett_spdy_flags);
         proto_tree_add_boolean(flags_tree, hf_spdy_flags_fin, tvb,
                                orig_offset+4, 1, flags);
-        proto_tree_add_uint(sub_tree, hf_spdy_length, tvb, orig_offset+5, 3,
-                            frame_length);
-        proto_tree_add_uint(sub_tree, hf_spdy_streamid, tvb, orig_offset+8, 4,
-                            stream_id);
+
+        /* Add length. */
+        proto_tree_add_item(sub_tree,
+                            hf_spdy_length,
+                            tvb,
+                            orig_offset+5,
+                            3,
+                            ENC_BIG_ENDIAN);
+
+        /* Add stream ID. */
+        proto_tree_add_item(sub_tree,
+                            hf_spdy_streamid,
+                            tvb,
+                            orig_offset + 8,
+                            4,
+                            ENC_BIG_ENDIAN);
+
+        /* Add fields specific to SYN_STREAM. */
         if (frame_type == SPDY_SYN_STREAM) {
-          proto_tree_add_uint(sub_tree, hf_spdy_associated_streamid, tvb,
-                              orig_offset+12, 4, associated_stream_id);
-          proto_tree_add_uint(sub_tree, hf_spdy_priority, tvb, orig_offset+16,
-                              1, priority);
+          /* Add associated stream ID. */
+          proto_tree_add_item(sub_tree,
+                              hf_spdy_associated_streamid,
+                              tvb,
+                              orig_offset + 12,
+                              4,
+                              ENC_BIG_ENDIAN);
+
+          /* Add priority. */
+          proto_tree_add_item(sub_tree,
+                              hf_spdy_priority,
+                              tvb,
+                              orig_offset + 16,
+                              3,
+                              ENC_BIG_ENDIAN);
         }
         proto_item_append_text(spdy_proto, ": %s%s stream=%d length=%d",
                                frame_type_name,
@@ -1510,23 +1554,23 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
       }
     }
     num_headers = tvb_get_ntohl(header_tvb, hdr_offset);
-    hdr_offset += 4;
     if (header_tvb == NULL ||
         (headers_compressed && !spdy_decompress_headers)) {
       num_headers = 0;
       ti = proto_tree_add_string(sub_tree, hf_spdy_num_headers_string, tvb,
                                  frame_type == SPDY_SYN_STREAM ?
-                                    orig_offset+18 : orig_offset + 14,
+                                    orig_offset + 18 : orig_offset + 12,
                                  2,
                                  "Unknown (header block is compressed)");
     } else {
-      ti = proto_tree_add_uint(sub_tree, hf_spdy_num_headers,
-                               tvb,
-                               frame_type == SPDY_SYN_STREAM ?
-                                  orig_offset+18 : orig_offset +14,
+      ti = proto_tree_add_item(sub_tree,
+                               hf_spdy_num_headers,
+                               header_tvb,
+                               hdr_offset,
                                4,
-                               num_headers);
+                               ENC_BIG_ENDIAN);
     }
+    hdr_offset += 4;
   }
 
   /* TODO(hkhalil): Remove this escape hatch, process headers as possible. */
@@ -1547,54 +1591,58 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
     gchar *header_value;
     proto_tree *header_tree;
     proto_item *header;
-    guint32 length;
-    gint header_length = 0;
+    proto_item *header_name_ti;
+    proto_item *header_value_ti;
+    int header_name_offset;
+    int header_value_offset;
+    guint32 header_name_length;
+    guint32 header_value_length;
 
-    hoffset = hdr_offset;
-
-    length = tvb_get_ntohl(header_tvb, hdr_offset);
+    /* Get header name details. */
+    header_name_offset = hdr_offset;
+    header_name_length = tvb_get_ntohl(header_tvb, hdr_offset);
     hdr_offset += 4;
     header_name = (gchar *)tvb_get_ephemeral_string(header_tvb,
                                                     hdr_offset,
-                                                    length);
-    hdr_offset += length;
-    header_length += hdr_offset - hoffset;
+                                                    header_name_length);
+    hdr_offset += header_name_length;
 
-    /* Add 'Header' subtree. */
-    /* TODO(hkhalil): Move inside if(tree). */
-
-    if (tree) {
-      header = proto_tree_add_item(spdy_tree, hf_spdy_header, header_tvb,
-                               hdr_offset, header_length, FALSE);
-      header_tree = proto_item_add_subtree(header, ett_spdy_header);
-      proto_tree_add_item(header_tree,
-                          hf_spdy_header_name,
-                          header_tvb,
-                          hoffset,
-                          4,
-                          ENC_NA);
-    }
-
-    hoffset = hdr_offset;
-    length = tvb_get_ntohl(header_tvb, hdr_offset);
+    /* Get header value details. */
+    header_value_offset = hdr_offset;
+    header_value_length = tvb_get_ntohl(header_tvb, hdr_offset);
     hdr_offset += 4;
     header_value = (gchar *)tvb_get_ephemeral_string(header_tvb,
                                                      hdr_offset,
-                                                     length);
-    hdr_offset += length;
-    header_length += hdr_offset - hoffset;
-    if (tree) {
-      /* Add 'Value' subtree with descriptive text. */
-      ti = proto_tree_add_item(header_tree,
-                               hf_spdy_header_value,
-                               header_tvb,
-                               hoffset,
-                               4,
-                               ENC_NA);
+                                                     header_value_length);
+    hdr_offset += header_value_length;
 
-      /* Add description for header subtree. */
-      /* TODO(hkhalil): Move up to where we create the header subtree. */
+    /* Populate tree with header name/value details. */
+    if (tree) {
+      /* Add 'Header' subtree with description. */
+      header = proto_tree_add_item(spdy_tree,
+                                   hf_spdy_header,
+                                   header_tvb,
+                                   header_name_offset,
+                                   hdr_offset - header_name_offset,
+                                   ENC_NA);
       proto_item_append_text(header, ": %s: %s", header_name, header_value);
+      header_tree = proto_item_add_subtree(header, ett_spdy_header);
+
+      /* Add header name. */
+      header_name_ti = proto_tree_add_item(header_tree,
+                                           hf_spdy_header_name,
+                                           header_tvb,
+                                           header_name_offset,
+                                           4,
+                                           ENC_NA);
+
+      /* Add 'Value' subtree with descriptive text. */
+      header_value_ti = proto_tree_add_item(header_tree,
+                                            hf_spdy_header_value,
+                                            header_tvb,
+                                            header_value_offset,
+                                            4,
+                                            ENC_NA);
     }
     if (spdy_debug) {
       printf("    %s: %s\n", header_name, header_value);
