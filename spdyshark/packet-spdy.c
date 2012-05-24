@@ -55,7 +55,14 @@
 #include <epan/expert.h>
 #include <epan/uat.h>
 
-#define SPDY_FIN  0x01
+#define SPDY_FLAG_FIN  0x01
+#define SPDY_FLAG_UNIDIRECTIONAL 0x02
+#define SPDY_FLAG_CLEAR_SETTINGS 0x01 /* TODO(hkhalil): Use. */
+
+/* Flags for each setting in a SETTINGS frame. */
+#define SPDY_SETTING_FLAG_PERSIST_VALUE 0x01 /* TODO(hkhalil): Use. */
+#define SPDY_SETTING_FLAG_PERSISTED 0x02 /* TODO(hkhalil): Use. */
+
 #define TCP_PORT_SPDY 6121
 #define SSL_PORT_SPDY 443
 
@@ -180,6 +187,7 @@ static int hf_spdy_version = -1;
 static int hf_spdy_type = -1;
 static int hf_spdy_flags = -1;
 static int hf_spdy_flags_fin = -1;
+static int hf_spdy_flags_unidirectional = -1;
 static int hf_spdy_length = -1;
 static int hf_spdy_header = -1;
 static int hf_spdy_header_name = -1;
@@ -757,25 +765,46 @@ static int dissect_spdy_data_frame(tvbuff_t *tvb, int offset,
                stream_id, frame_length);
 
   proto_item_append_text(spdy_proto, ":%s stream=%d length=%d",
-                         flags & SPDY_FIN ? " [FIN]" : "", stream_id,
+                         flags & SPDY_FLAG_FIN ? " [FIN]" : "", stream_id,
                          frame_length);
 
-  proto_tree_add_boolean(spdy_tree, hf_spdy_control_bit, tvb, offset, 1, 0);
+  /* Add control bit. */
+  proto_tree_add_bits_item(spdy_tree,
+                           hf_spdy_control_bit,
+                           tvb,
+                           offset * 8,
+                           1,
+                           ENC_NA);
+
+  /* Add stream ID. */
   proto_tree_add_item(spdy_tree,
                       hf_spdy_streamid,
                       tvb,
                       offset,
                       4,
                       ENC_BIG_ENDIAN);
-  proto_tree_add_bytes(spdy_tree, hf_spdy_data, tvb, offset + 8, frame_length,
-                       "Some Arbitrary Data"); /* TODO(hkhalil): Improve. */
+
+  /* Add data. */
+  proto_tree_add_item(spdy_tree,
+                      hf_spdy_data,
+                      tvb, offset + 8,
+                      frame_length,
+                      ENC_NA);
+
+  /* Add flags. */
   ti = proto_tree_add_uint_format(spdy_tree, hf_spdy_flags, tvb, offset+4, 1,
                                   flags, "Flags: 0x%02x%s", flags,
-                                  flags&SPDY_FIN ? " (FIN)" : "");
+                                  flags&SPDY_FLAG_FIN ? " (FIN)" : "");
 
   flags_tree = proto_item_add_subtree(ti, ett_spdy_flags);
-  proto_tree_add_boolean(flags_tree, hf_spdy_flags_fin, tvb, offset + 4, 1,
-                         flags);
+  proto_tree_add_item(flags_tree,
+                      hf_spdy_flags_fin,
+                      tvb,
+                      offset + 4,
+                      1,
+                      ENC_BIG_ENDIAN);
+
+  /* Add length. */
   proto_tree_add_item(spdy_tree,
                       hf_spdy_length,
                       tvb,
@@ -813,7 +842,7 @@ static int dissect_spdy_data_frame(tvbuff_t *tvb, int offset,
     if (datalen != 0) {
       next_tvb = tvb_new_subset(tvb, offset+8, datalen,
                                 reported_datalen);
-      is_single_chunk = num_data_frames == 0 && (flags & SPDY_FIN) != 0;
+      is_single_chunk = num_data_frames == 0 && (flags & SPDY_FLAG_FIN) != 0;
       if (!pinfo->fd->flags.visited) {
         if (!is_single_chunk) {
           if (spdy_assemble_entity_bodies) {
@@ -829,7 +858,7 @@ static int dissect_spdy_data_frame(tvbuff_t *tvb, int offset,
       is_single_chunk = (num_data_frames == 1);
     }
 
-    if (!(flags & SPDY_FIN)) {
+    if (!(flags & SPDY_FLAG_FIN)) {
       col_set_fence(pinfo->cinfo, COL_INFO);
       col_add_fstr(pinfo->cinfo, COL_INFO, " (partial entity)");
       proto_item_append_text(spdy_proto, " (partial entity body)");
@@ -1383,10 +1412,22 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
         ti = proto_tree_add_uint_format(sub_tree, hf_spdy_flags, tvb,
                                         orig_offset+4, 1, flags,
                                         "Flags: 0x%02x%s", flags,
-                                        flags&SPDY_FIN ? " (FIN)" : "");
+                                        flags&SPDY_FLAG_FIN ? " (FIN)" : "");
         flags_tree = proto_item_add_subtree(ti, ett_spdy_flags);
-        proto_tree_add_boolean(flags_tree, hf_spdy_flags_fin, tvb,
-                               orig_offset+4, 1, flags);
+        proto_tree_add_item(flags_tree,
+                            hf_spdy_flags_fin,
+                            tvb,
+                            offset + 4,
+                            1,
+                            ENC_BIG_ENDIAN);
+        if (frame_type == SPDY_SYN_STREAM) {
+          proto_tree_add_item(flags_tree,
+                              hf_spdy_flags_unidirectional,
+                              tvb,
+                              offset + 4,
+                              1,
+                              ENC_BIG_ENDIAN);
+        }
 
         /* Add length. */
         proto_tree_add_item(sub_tree,
@@ -1424,7 +1465,7 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
         }
         proto_item_append_text(spdy_proto, ": %s%s stream=%d length=%d",
                                frame_type_name,
-                               flags & SPDY_FIN ? " [FIN]" : "",
+                               flags & SPDY_FLAG_FIN ? " [FIN]" : "",
                                stream_id, frame_length);
         if (spdy_debug) {
           printf("  stream ID=%u priority=%d\n", stream_id, priority);
@@ -1832,7 +1873,8 @@ void proto_register_spdy(void) {
     },
     { &hf_spdy_type,
       { "Type",           "spdy.type",
-        FT_UINT16, BASE_DEC, NULL, 0x0,
+        FT_UINT16, BASE_DEC, /* TODO(hkhalil): Use VALS(frametypenames) */
+        NULL, 0x0,
         "", HFILL
       }
     },
@@ -1843,9 +1885,17 @@ void proto_register_spdy(void) {
       }
     },
     { &hf_spdy_flags_fin,
-      { "Fin",            "spdy.flags.fin",
-        FT_BOOLEAN, 8, TFS(&tfs_spdy_set_notset),
-        SPDY_FIN, "", HFILL
+      { "FIN",            "spdy.flags.fin",
+        FT_BOOLEAN, 8,
+        TFS(&tfs_spdy_set_notset), SPDY_FLAG_FIN,
+        NULL, HFILL
+      }
+    },
+    { &hf_spdy_flags_unidirectional,
+      { "Unidirectional", "spdy.flags.fin",
+        FT_BOOLEAN, 8,
+        TFS(&tfs_spdy_set_notset), SPDY_FLAG_UNIDIRECTIONAL,
+        NULL, HFILL
       }
     },
     { &hf_spdy_length,
