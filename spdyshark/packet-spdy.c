@@ -178,9 +178,6 @@ static int spdy_tap = -1;
 static int spdy_eo_tap = -1;
 
 static int proto_spdy = -1;
-static int hf_spdy_syn_stream = -1;
-static int hf_spdy_syn_reply = -1;
-static int hf_spdy_headers = -1;
 static int hf_spdy_data = -1;
 static int hf_spdy_control_bit = -1;
 static int hf_spdy_version = -1;
@@ -199,13 +196,8 @@ static int hf_spdy_num_headers = -1;
 static int hf_spdy_num_headers_string = -1;
 
 static gint ett_spdy = -1;
-static gint ett_spdy_syn_stream = -1;
-static gint ett_spdy_syn_reply = -1;
-static gint ett_spdy_fin_stream = -1;
 static gint ett_spdy_flags = -1;
 static gint ett_spdy_header = -1;
-static gint ett_spdy_header_name = -1;
-static gint ett_spdy_header_value = -1;
 
 static gint ett_spdy_encoded_entity = -1;
 
@@ -734,12 +726,14 @@ static tvbuff_t* spdy_tvb_child_uncompress(tvbuff_t *parent _U_, tvbuff_t *tvb,
 static void dissect_spdy_control_bit(tvbuff_t *tvb,
                                      int offset,
                                      proto_tree *frame_tree) {
-  proto_tree_add_bits_item(frame_tree,
-                           hf_spdy_control_bit,
-                           tvb,
-                           offset * 8,
-                           1,
-                           ENC_NA);
+  if (frame_tree) {
+    proto_tree_add_bits_item(frame_tree,
+                             hf_spdy_control_bit,
+                             tvb,
+                             offset * 8,
+                             1,
+                             ENC_NA);
+  }
 }
 
 /*
@@ -1252,7 +1246,7 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
   guint32             stream_id = 0;
   guint32             associated_stream_id = 0;
   gint                priority = 0;
-  guint32             num_headers;
+  guint32             num_headers = 0;
   guint32             rst_status;
   guint32             ping_id;
   guint32             window_update_delta;
@@ -1264,7 +1258,6 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
   proto_item          *spdy_proto = NULL;
   int                 orig_offset;
   int                 hdr_offset = 0;
-  proto_tree          *sub_tree = NULL;
   proto_tree          *flags_tree;
   tvbuff_t            *header_tvb = NULL;
   gboolean            headers_compressed;
@@ -1339,42 +1332,46 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
     spdy_tree = proto_item_add_subtree(spdy_proto, ett_spdy);
   }
 
-  if (control_bit) {
-    if (spdy_debug) {
-        printf("Control frame [version=%d type=%d flags=0x%x length=%d]\n",
-                version, frame_type, flags, frame_length);
-    }
-    if (tree) {
-      proto_item_append_text(spdy_tree, ", control frame");
-    }
-  } else {
+  if (!control_bit) {
     return dissect_spdy_data_frame(tvb, orig_offset, pinfo, tree,
                                    spdy_tree, spdy_proto, conv_data);
+  }
+  if (spdy_debug) {
+      printf("Control frame [version=%d type=%d flags=0x%x length=%d]\n",
+              version, frame_type, flags, frame_length);
   }
 
   /* Add frame info. */
   col_add_str(pinfo->cinfo, COL_INFO, frame_type_name);
 
-  num_headers = 0;
+  if (spdy_tree) {
+    /* Add control frame info to tree root. */
+    proto_item_append_text(spdy_tree, ", control frame");
+
+    /* Add control bit. */
+    dissect_spdy_control_bit(tvb, offset, spdy_tree);
+
+    /* Add version. */
+    proto_tree_add_bits_item(spdy_tree,
+                             hf_spdy_version,
+                             tvb,
+                             orig_offset * 8 + 1,
+                             15,
+                             ENC_BIG_ENDIAN);
+
+    /* Add control frame type. */
+    proto_tree_add_item(spdy_tree,
+                        hf_spdy_type,
+                        tvb,
+                        orig_offset + 2,
+                        2,
+                        ENC_BIG_ENDIAN);
+  }
+
   switch (frame_type) {
     case SPDY_SYN_STREAM:
     case SPDY_SYN_REPLY:
     case SPDY_HEADERS:
-      /* Set up bytes in tree. */
-      if (tree) {
-        int hf;
-        if (frame_type == SPDY_SYN_STREAM) {
-          hf = hf_spdy_syn_stream;
-        } else if (frame_type == SPDY_SYN_REPLY) {
-          hf = hf_spdy_syn_reply;
-        } else {
-          hf = hf_spdy_headers;
-        }
-        ti = proto_tree_add_bytes(spdy_tree, hf, tvb,
-                                  orig_offset, 8, frame_header);
-        sub_tree = proto_item_add_subtree(ti, ett_spdy_syn_stream);
-      }
-
       /* Get stream id. */
       stream_id = tvb_get_bits32(tvb, (offset << 3) + 1, 31, FALSE);
       offset += 4;
@@ -1393,27 +1390,9 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
 
       /* Populate tree. */
       if (tree) {
-        /* Add control bit. */
-        dissect_spdy_control_bit(tvb, orig_offset, sub_tree);
-
-        /* Add version. */
-        proto_tree_add_bits_item(sub_tree,
-                                 hf_spdy_version,
-                                 tvb,
-                                 orig_offset * 8 + 1,
-                                 15,
-                                 ENC_BIG_ENDIAN);
-
-        /* Add control frame type. */
-        proto_tree_add_item(sub_tree,
-                            hf_spdy_type,
-                            tvb,
-                            orig_offset + 2,
-                            2,
-                            ENC_BIG_ENDIAN);
 
         /* Add flags. */
-        ti = proto_tree_add_uint_format(sub_tree, hf_spdy_flags, tvb,
+        ti = proto_tree_add_uint_format(spdy_tree, hf_spdy_flags, tvb,
                                         orig_offset+4, 1, flags,
                                         "Flags: 0x%02x%s", flags,
                                         flags&SPDY_FLAG_FIN ? " (FIN)" : "");
@@ -1434,7 +1413,7 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
         }
 
         /* Add length. */
-        proto_tree_add_item(sub_tree,
+        proto_tree_add_item(spdy_tree,
                             hf_spdy_length,
                             tvb,
                             orig_offset+5,
@@ -1442,7 +1421,7 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
                             ENC_BIG_ENDIAN);
 
         /* Add stream ID. */
-        proto_tree_add_item(sub_tree,
+        proto_tree_add_item(spdy_tree,
                             hf_spdy_streamid,
                             tvb,
                             orig_offset + 8,
@@ -1452,7 +1431,7 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
         /* Add fields specific to SYN_STREAM. */
         if (frame_type == SPDY_SYN_STREAM) {
           /* Add associated stream ID. */
-          proto_tree_add_item(sub_tree,
+          proto_tree_add_item(spdy_tree,
                               hf_spdy_associated_streamid,
                               tvb,
                               orig_offset + 12,
@@ -1460,7 +1439,7 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
                               ENC_BIG_ENDIAN);
 
           /* Add priority. */
-          proto_tree_add_item(sub_tree,
+          proto_tree_add_item(spdy_tree,
                               hf_spdy_priority,
                               tvb,
                               orig_offset + 16,
@@ -1598,17 +1577,19 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
         hdr_offset = 0;
       }
     }
+
+    /* Add number of headers. */
     num_headers = tvb_get_ntohl(header_tvb, hdr_offset);
     if (header_tvb == NULL ||
         (headers_compressed && !spdy_decompress_headers)) {
       num_headers = 0;
-      ti = proto_tree_add_string(sub_tree, hf_spdy_num_headers_string, tvb,
+      ti = proto_tree_add_string(spdy_tree, hf_spdy_num_headers_string, tvb,
                                  frame_type == SPDY_SYN_STREAM ?
                                     orig_offset + 18 : orig_offset + 12,
                                  2,
                                  "Unknown (header block is compressed)");
     } else {
-      ti = proto_tree_add_item(sub_tree,
+      ti = proto_tree_add_item(spdy_tree,
                                hf_spdy_num_headers,
                                header_tvb,
                                hdr_offset,
@@ -1839,24 +1820,6 @@ static const true_false_string tfs_spdy_set_notset = { "Set", "Not set" };
  */
 void proto_register_spdy(void) {
   static hf_register_info hf[] = {
-    { &hf_spdy_syn_stream,
-      { "Syn Stream",     "spdy.syn_stream",
-        FT_BYTES, BASE_NONE, NULL, 0x0,
-        "", HFILL
-      }
-    },
-    { &hf_spdy_syn_reply,
-      { "Syn Reply",      "spdy.syn_reply",
-        FT_BYTES, BASE_NONE, NULL, 0x0,
-        "", HFILL
-      }
-    },
-    { &hf_spdy_headers,
-      { "Headers",        "spdy.headers",
-        FT_BYTES, BASE_NONE, NULL, 0x0,
-        "", HFILL
-      }
-    },
     { &hf_spdy_data,
       { "Data",           "spdy.data",
         FT_BYTES, BASE_NONE, NULL, 0x0,
@@ -1959,13 +1922,8 @@ void proto_register_spdy(void) {
   };
   static gint *ett[] = {
     &ett_spdy,
-    &ett_spdy_syn_stream,
-    &ett_spdy_syn_reply,
-    &ett_spdy_fin_stream,
     &ett_spdy_flags,
     &ett_spdy_header,
-    &ett_spdy_header_name,
-    &ett_spdy_header_value,
     &ett_spdy_encoded_entity,
   };
 
