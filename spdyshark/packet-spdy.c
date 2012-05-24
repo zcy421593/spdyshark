@@ -760,8 +760,6 @@ static int dissect_spdy_data_frame(tvbuff_t *tvb, int offset,
   guint32 frame_length;
   proto_item *flags_ti;
   proto_tree *flags_tree;
-  guint32 reported_datalen;
-  guint32 datalen;
   dissector_table_t media_type_subdissector_table;
   dissector_table_t port_subdissector_table;
   dissector_handle_t handle;
@@ -833,26 +831,8 @@ static int dissect_spdy_data_frame(tvbuff_t *tvb, int offset,
                         ENC_NA);
   }
 
-  datalen = tvb_length_remaining(tvb, offset);
-  if (datalen > frame_length) {
-    /* This should never happen, since we expect packet re-assembly to
-     * reassemble whole frames for us. */
-    proto_item_append_text(spdy_proto, " [Partial frame]");
-    if (spdy_debug) {
-      printf("Got only part (%d/%d) of data frame. Aborting.",
-             datalen,
-             frame_length);
-    }
-    return -1;
-  }
-
-  reported_datalen = tvb_reported_length_remaining(tvb, offset);
-  if (reported_datalen > frame_length) {
-    reported_datalen = frame_length;
-  }
-
   num_data_frames = spdy_get_num_data_frames(conv_data, stream_id);
-  if (datalen != 0 || num_data_frames != 0) {
+  if (frame_length != 0 || num_data_frames != 0) {
     /*
      * There's stuff left over; process it.
      */
@@ -868,16 +848,18 @@ static int dissect_spdy_data_frame(tvbuff_t *tvb, int offset,
     /*
      * Create a tvbuff for the payload.
      */
-    if (datalen != 0) {
-      next_tvb = tvb_new_subset(tvb, offset+8, datalen,
-                                reported_datalen);
+    if (frame_length != 0) {
+      next_tvb = tvb_new_subset(tvb, offset+8, frame_length, frame_length);
       is_single_chunk = num_data_frames == 0 && (flags & SPDY_FLAG_FIN) != 0;
       if (!pinfo->fd->flags.visited) {
         if (!is_single_chunk) {
           if (spdy_assemble_entity_bodies) {
-            copied_data = tvb_memdup(next_tvb, 0, datalen);
-            spdy_add_data_chunk(conv_data, stream_id, pinfo->fd->num,
-                                copied_data, datalen);
+            copied_data = tvb_memdup(next_tvb, 0, frame_length);
+            spdy_add_data_chunk(conv_data,
+                                stream_id,
+                                pinfo->fd->num,
+                                copied_data,
+                                frame_length);
           } else {
             spdy_increment_data_chunk_count(conv_data, stream_id);
           }
@@ -1066,7 +1048,7 @@ body_dissected:
         pinfo->private_data = save_private_data;
     }
     /*
-     * We've processed "datalen" bytes worth of data
+     * We've processed frame_length bytes worth of data
      * (which may be no data at all); advance the
      * offset past whatever data we've processed.
      */
@@ -1375,10 +1357,10 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
   /*
    * Minimum size for a SPDY frame is 8 bytes.
    */
-  if (tvb_reported_length_remaining(tvb, offset) < 8) {
+  if (tvb_length_remaining(tvb, offset) < 8) {
     if (spdy_debug) {
       printf("Reported length remaining too small (%d < 8)\n",
-             tvb_reported_length_remaining(tvb, offset));
+             tvb_length_remaining(tvb, offset));
     }
     return -1;
   }
@@ -1416,10 +1398,10 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
   /*
    * Make sure there's as much data as the frame header says there is.
    */
-  if ((guint)tvb_reported_length_remaining(tvb, offset) < frame_length) {
+  if ((guint)tvb_length_remaining(tvb, offset) < frame_length) {
     if (spdy_debug) {
       printf("Not enough frame data: %d vs. %d\n",
-              frame_length, tvb_reported_length_remaining(tvb, offset));
+              frame_length, tvb_length_remaining(tvb, offset));
     }
     return -1;
   }
@@ -1783,7 +1765,7 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
   /* Process headers. */
   hdr_verb = hdr_url = hdr_version = content_type = content_encoding = NULL;
   while (num_headers-- &&
-         tvb_reported_length_remaining(header_tvb, hdr_offset) != 0) {
+         tvb_length_remaining(header_tvb, hdr_offset) != 0) {
     gchar *header_name;
     gchar *header_value;
     proto_tree *header_tree;
@@ -1898,7 +1880,7 @@ static int dissect_spdy(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree) {
   int offset = 0;
   int expected_frame_len = 0;
   int dissected_len = 0;
-  int remaining_len = tvb_reported_length_remaining(tvb, offset);
+  int remaining_len = tvb_length_remaining(tvb, offset);
 
   /* Loop over the buffer. */
   while (remaining_len > 0) {
@@ -1927,7 +1909,7 @@ static int dissect_spdy(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree) {
       return offset;
     }
     offset += dissected_len;
-    remaining_len = tvb_reported_length_remaining(tvb, offset);
+    remaining_len = tvb_length_remaining(tvb, offset);
 
     /*
      * OK, we've set the Protocol and Info columns for the
