@@ -729,6 +729,20 @@ static tvbuff_t* spdy_tvb_child_uncompress(tvbuff_t *parent _U_, tvbuff_t *tvb,
 }
 
 /*
+ * Adds control bit details to proto tree.
+ */
+static void dissect_spdy_control_bit(tvbuff_t *tvb,
+                                     int offset,
+                                     proto_tree *frame_tree) {
+  proto_tree_add_bits_item(frame_tree,
+                           hf_spdy_control_bit,
+                           tvb,
+                           offset * 8,
+                           1,
+                           ENC_NA);
+}
+
+/*
  * Performs DATA frame dissection.
  */
 static int dissect_spdy_data_frame(tvbuff_t *tvb, int offset,
@@ -769,12 +783,7 @@ static int dissect_spdy_data_frame(tvbuff_t *tvb, int offset,
                          frame_length);
 
   /* Add control bit. */
-  proto_tree_add_bits_item(spdy_tree,
-                           hf_spdy_control_bit,
-                           tvb,
-                           offset * 8,
-                           1,
-                           ENC_NA);
+  dissect_spdy_control_bit(tvb, offset, spdy_tree);
 
   /* Add stream ID. */
   proto_tree_add_item(spdy_tree,
@@ -1385,12 +1394,7 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
       /* Populate tree. */
       if (tree) {
         /* Add control bit. */
-        proto_tree_add_bits_item(sub_tree,
-                                 hf_spdy_control_bit,
-                                 tvb,
-                                 orig_offset * 8,
-                                 1,
-                                 ENC_NA);
+        dissect_spdy_control_bit(tvb, orig_offset, sub_tree);
 
         /* Add version. */
         proto_tree_add_bits_item(sub_tree,
