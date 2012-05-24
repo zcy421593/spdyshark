@@ -55,6 +55,8 @@
 #include <epan/expert.h>
 #include <epan/uat.h>
 
+#define MIN_SPDY_VERSION 3
+
 #define SPDY_FLAG_FIN  0x01
 #define SPDY_FLAG_UNIDIRECTIONAL 0x02
 #define SPDY_FLAG_CLEAR_SETTINGS 0x01 /* TODO(hkhalil): Use. */
@@ -188,6 +190,7 @@ static int hf_spdy_flags_unidirectional = -1;
 static int hf_spdy_flags_persist_value = -1;
 static int hf_spdy_flags_persisted = -1;
 static int hf_spdy_length = -1;
+static int hf_spdy_header_block = -1;
 static int hf_spdy_header = -1;
 static int hf_spdy_header_name = -1;
 static int hf_spdy_header_value = -1;
@@ -195,7 +198,6 @@ static int hf_spdy_streamid = -1;
 static int hf_spdy_associated_streamid = -1;
 static int hf_spdy_priority = -1;
 static int hf_spdy_num_headers = -1;
-static int hf_spdy_num_headers_string = -1;
 static int hf_spdy_num_settings = -1;
 static int hf_spdy_setting = -1;
 static int hf_spdy_setting_id = -1;
@@ -203,6 +205,7 @@ static int hf_spdy_setting_value = -1;
 
 static gint ett_spdy = -1;
 static gint ett_spdy_flags = -1;
+static gint ett_spdy_header_block = -1;
 static gint ett_spdy_header = -1;
 static gint ett_spdy_setting = -1;
 
@@ -1180,6 +1183,9 @@ static int dissect_spdy_settings(tvbuff_t *tvb,
 
 /*
  * Performs header decompression.
+ *
+ * The returned buffer is automatically scoped to the lifetime of the capture
+ * (via se_memdup()).
  */
 static guint8* spdy_decompress_header_block(tvbuff_t *tvb,
                                             z_streamp decomp,
@@ -1233,8 +1239,7 @@ typedef struct _spdy_frame_proto_data {
   void *proto_data;
 } spdy_frame_proto_data;
 
-static gint spdy_p_compare(gconstpointer a, gconstpointer b)
-{
+static gint spdy_p_compare(gconstpointer a, gconstpointer b) {
   const spdy_frame_proto_data *ap = (const spdy_frame_proto_data *)a;
   const spdy_frame_proto_data *bp = (const spdy_frame_proto_data *)b;
 
@@ -1264,7 +1269,7 @@ static void spdy_p_remove_proto_data(frame_data *fd, int proto) {
 /*
  * Saves state on header data for a given stream.
  */
-static spdy_frame_info_t * spdy_save_header_block(frame_data *fd,
+static spdy_frame_info_t* spdy_save_header_block(frame_data *fd,
                                                   guint32 stream_id,
                                                   guint frame_type,
                                                   guint8 *header,
@@ -1490,6 +1495,17 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
                         ENC_BIG_ENDIAN);
   }
 
+  /* Abort here if the version is too low. */
+  if (version < MIN_SPDY_VERSION) {
+    if (spdy_tree) {
+      proto_item_append_text(spdy_proto, " [Unsupported Version]");
+    }
+    if (spdy_debug) {
+      printf("Unsupported version. Gracefully aborting frame dissection.\n");
+    }
+    return frame_length + 8;
+  }
+
   switch (frame_type) {
     case SPDY_SYN_STREAM:
     case SPDY_SYN_REPLY:
@@ -1556,12 +1572,12 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
                               ENC_BIG_ENDIAN);
 
           /* Add priority. */
-          proto_tree_add_item(spdy_tree,
-                              hf_spdy_priority,
-                              tvb,
-                              orig_offset + 16,
-                              3,
-                              ENC_BIG_ENDIAN);
+          proto_tree_add_bits_item(spdy_tree,
+                                   hf_spdy_priority,
+                                   tvb,
+                                   (orig_offset + 16) * 8,
+                                   3,
+                                   ENC_BIG_ENDIAN);
         }
         proto_item_append_text(spdy_proto, ": %s%s stream=%d length=%d",
                                frame_type_name,
@@ -1645,66 +1661,107 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
    * Process the name-value pairs one at a time, after possibly
    * decompressing the header block.
    */
-  if (frame_type == SPDY_SYN_STREAM || frame_type == SPDY_SYN_REPLY) {
+  if (frame_type == SPDY_SYN_STREAM ||
+      frame_type == SPDY_SYN_REPLY ||
+      frame_type == SPDY_HEADERS) {
+    int header_block_length = frame_length + 8 - (offset - orig_offset);
+    proto_item *header_block_item;
+    proto_tree *header_block_tree;
+
+    if (spdy_tree) {
+      /* Add the header block. */
+      header_block_item = proto_tree_add_item(spdy_tree,
+                                              hf_spdy_header_block,
+                                              tvb,
+                                              offset,
+                                              header_block_length,
+                                              ENC_NA);
+      header_block_tree = proto_item_add_subtree(header_block_item,
+                                                 ett_spdy_header_block);
+    }
+
+    /* Decompress header block as necessary. */
     if (!spdy_decompress_headers) {
         header_tvb = tvb;
         hdr_offset = offset;
     } else {
-      spdy_frame_info_t *per_frame_info =
-          spdy_find_saved_header_block(pinfo->fd,
-                                       stream_id,
-                                       frame_type == SPDY_SYN_REPLY);
+      spdy_frame_info_t *per_frame_info;
+
+      /* First attempt to find previously decompressed data.
+       * This will not work correctly for lower-level frames that contain more
+       * than one SPDY frame of the same type. We assume this to never be the
+       * case, though. */
+      per_frame_info = spdy_find_saved_header_block(pinfo->fd,
+                                                    stream_id,
+                                                    frame_type);
+
+      /* Generate decompressed data and store it, since none was found. */
       if (per_frame_info == NULL) {
         guint uncomp_length;
-        z_streamp decomp = frame_type == SPDY_SYN_STREAM ?
-             conv_data->rqst_decompressor : conv_data->rply_decompressor;
-        guint8 *uncomp_ptr =
-            spdy_decompress_header_block(tvb, decomp, conv_data->dictionary_id,
-                offset, frame_length + 8 - (offset - orig_offset),
-                &uncomp_length);
-        if (uncomp_ptr == NULL) { /* decompression failed */
-          if (spdy_debug) {
-              printf("Frame #%d: Inflation failed\n", pinfo->fd->num);
-          }
-          proto_item_append_text(spdy_proto,
-                                 " [Error: Header decompression failed]");
-          /* Should we just bail here? */
+        z_streamp decomp;
+        guint8 *uncomp_ptr;
+
+        /* Get our decompressor. */
+        if (stream_id % 2 == 0) {
+          /* Even streams are server-initiated and should never get a
+           * client-initiated header block. Use reply decompressor. */
+          decomp = conv_data->rply_decompressor;
+        } else if (frame_type == SPDY_HEADERS) {
+          /* Odd streams are client-initiated, but may have HEADERS from either
+           * side. Currently, no known clients send HEADERS so we assume they are
+           * all from the server. */
+          decomp = conv_data->rply_decompressor;
+        } else if (frame_type == SPDY_SYN_STREAM) {
+          decomp = conv_data->rqst_decompressor;
+        } else if (frame_type == SPDY_SYN_REPLY) {
+          decomp = conv_data->rply_decompressor;
         } else {
-          if (spdy_debug) {
-            printf("Saving %u bytes of uncomp hdr\n", uncomp_length);
-          }
-          per_frame_info =
-            spdy_save_header_block(pinfo->fd, stream_id,
-                                   frame_type == SPDY_SYN_REPLY, uncomp_ptr,
-                                   uncomp_length);
+          /* Unhandled case. This should never happen. */
+          assert(FALSE);
         }
-      } else if (spdy_debug) {
-        printf("Found uncompressed header block len %u for stream %u "
-               "frame_type=%d\n",
-               per_frame_info->header_block_len,
-               per_frame_info->stream_id,
-               per_frame_info->frame_type);
+
+        /* Decompress. */
+        uncomp_ptr = spdy_decompress_header_block(tvb,
+                                                  decomp,
+                                                  conv_data->dictionary_id,
+                                                  offset,
+                                                  header_block_length,
+                                                  &uncomp_length);
+
+        /* Catch decompression failures. */
+        if (uncomp_ptr == NULL) {
+          if (spdy_debug) {
+              printf("Frame #%d: Inflation failed. Aborting.\n", pinfo->fd->num);
+          }
+          if (spdy_proto) {
+            proto_item_append_text(spdy_proto,
+                                   " [Error: Header decompression failed]");
+          }
+          return -1;
+        }
+
+        /* Store decompressed data. */
+        per_frame_info = spdy_save_header_block(pinfo->fd,
+                                                stream_id,
+                                                frame_type,
+                                                uncomp_ptr,
+                                                uncomp_length);
       }
-      if (per_frame_info != NULL) {
-        header_tvb = tvb_new_child_real_data(tvb,
-                                         per_frame_info->header_block,
-                                         per_frame_info->header_block_len,
-                                         per_frame_info->header_block_len);
-        add_new_data_source(pinfo, header_tvb, "Uncompressed headers");
-        hdr_offset = 0;
-      }
+
+      /* Create a tvb containing the uncompressed data. */
+      header_tvb = tvb_new_child_real_data(tvb,
+                                           per_frame_info->header_block,
+                                           per_frame_info->header_block_len,
+                                           per_frame_info->header_block_len);
+      add_new_data_source(pinfo, header_tvb, "Uncompressed headers");
+      hdr_offset = 0;
     }
 
-    /* Add number of headers. */
-    num_headers = tvb_get_ntohl(header_tvb, hdr_offset);
+    /* Get header block details. */
     if (header_tvb == NULL || !spdy_decompress_headers) {
       num_headers = 0;
-      ti = proto_tree_add_string(spdy_tree, hf_spdy_num_headers_string, tvb,
-                                 frame_type == SPDY_SYN_STREAM ?
-                                    orig_offset + 18 : orig_offset + 12,
-                                 2,
-                                 "Unknown (header block is compressed)");
     } else {
+      num_headers = tvb_get_ntohl(header_tvb, hdr_offset);
       ti = proto_tree_add_item(spdy_tree,
                                hf_spdy_num_headers,
                                header_tvb,
@@ -2001,6 +2058,12 @@ void proto_register_spdy(void) {
         "", HFILL
       }
     },
+    { &hf_spdy_header_block,
+      { "Header block", "spdy.header_block",
+          FT_BYTES, BASE_NONE, NULL, 0x0,
+          "", HFILL
+      }
+    },
     { &hf_spdy_header,
       { "Header",         "spdy.header",
         FT_NONE, BASE_NONE, NULL, 0x0,
@@ -2043,12 +2106,6 @@ void proto_register_spdy(void) {
           "", HFILL
       }
     },
-    { &hf_spdy_num_headers_string,
-      { "Number of headers", "spdy.numheaders",
-          FT_STRING, BASE_NONE, NULL, 0x0,
-          "", HFILL
-      }
-    },
     { &hf_spdy_num_settings,
       { "Number of Settings", "spdy.num_settings",
           FT_UINT32, BASE_DEC, NULL, 0x0,
@@ -2077,6 +2134,7 @@ void proto_register_spdy(void) {
   static gint *ett[] = {
     &ett_spdy,
     &ett_spdy_flags,
+    &ett_spdy_header_block,
     &ett_spdy_header,
     &ett_spdy_setting,
     &ett_spdy_encoded_entity,
