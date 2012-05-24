@@ -835,7 +835,15 @@ static int dissect_spdy_data_frame(tvbuff_t *tvb, int offset,
 
   datalen = tvb_length_remaining(tvb, offset);
   if (datalen > frame_length) {
-    datalen = frame_length;
+    /* This should never happen, since we expect packet re-assembly to
+     * reassemble whole frames for us. */
+    proto_item_append_text(spdy_proto, " [Partial frame]");
+    if (spdy_debug) {
+      printf("Got only part (%d/%d) of data frame. Aborting.",
+             datalen,
+             frame_length);
+    }
+    return -1;
   }
 
   reported_datalen = tvb_reported_length_remaining(tvb, offset);
