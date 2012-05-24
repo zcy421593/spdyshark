@@ -1226,31 +1226,6 @@ static guint8* spdy_decompress_header_block(tvbuff_t *tvb,
   return se_memdup(uncomp_block, *uncomp_length);
 }
 
-/*
- * Try to determine heuristically whether the header block is
- * compressed. For an uncompressed block, the first two bytes
- * gives the number of headers. Each header name and value is
- * a two-byte length followed by ASCII characters.
- */
-static gboolean spdy_check_header_compression(tvbuff_t *tvb,
-                                              int offset,
-                                              guint32 frame_length) {
-  guint16 length;
-  if (!tvb_bytes_exist(tvb, offset, 6)) {
-    return 1;
-  }
-  length = tvb_get_ntohs(tvb, offset);
-  if (length > frame_length) {
-    return 1;
-  }
-  length = tvb_get_ntohs(tvb, offset+2);
-  if (length > frame_length) {
-    return 1;
-  }
-  if (spdy_debug) printf("Looks like the header block is not compressed\n");
-  return 0;
-}
-
 /* TODO(cbentzel): Change wireshark to export p_remove_proto_data, rather
  * than duplicating code here. */
 typedef struct _spdy_frame_proto_data {
@@ -1380,9 +1355,8 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
   proto_item          *spdy_proto = NULL;
   int                 orig_offset;
   int                 hdr_offset = 0;
-  proto_tree          *flags_tree;
+  proto_tree          *flags_tree = NULL;
   tvbuff_t            *header_tvb = NULL;
-  gboolean            headers_compressed;
   gchar               *hdr_verb = NULL;
   gchar               *hdr_url = NULL;
   gchar               *hdr_version = NULL;
@@ -1672,9 +1646,7 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
    * decompressing the header block.
    */
   if (frame_type == SPDY_SYN_STREAM || frame_type == SPDY_SYN_REPLY) {
-    headers_compressed = spdy_check_header_compression(tvb, offset,
-                                                       frame_length);
-    if (!spdy_decompress_headers || !headers_compressed) {
+    if (!spdy_decompress_headers) {
         header_tvb = tvb;
         hdr_offset = offset;
     } else {
@@ -1725,8 +1697,7 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
 
     /* Add number of headers. */
     num_headers = tvb_get_ntohl(header_tvb, hdr_offset);
-    if (header_tvb == NULL ||
-        (headers_compressed && !spdy_decompress_headers)) {
+    if (header_tvb == NULL || !spdy_decompress_headers) {
       num_headers = 0;
       ti = proto_tree_add_string(spdy_tree, hf_spdy_num_headers_string, tvb,
                                  frame_type == SPDY_SYN_STREAM ?
