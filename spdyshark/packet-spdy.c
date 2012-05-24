@@ -758,7 +758,6 @@ static int dissect_spdy_data_frame(tvbuff_t *tvb, int offset,
   guint32 stream_id;
   guint8 flags;
   guint32 frame_length;
-  proto_item *ti;
   proto_item *flags_ti;
   proto_tree *flags_tree;
   guint32 reported_datalen;
@@ -1039,16 +1038,7 @@ static int dissect_spdy_data_frame(tvbuff_t *tvb, int offset,
       dissected = FALSE;
     }
 
-    if (dissected) {
-      /*
-       * The subdissector dissected the body.
-       * Fix up the top-level item so that it doesn't
-       * include the stuff for that protocol.
-       */
-      if (ti != NULL) {
-        proto_item_set_len(ti, offset);
-      }
-    } else if (have_entire_body && si->content_type != NULL) {
+    if (!dissected && have_entire_body && si->content_type != NULL) {
       /*
        * Calling the default media handle if there is a content-type that
        * wasn't handled above.
