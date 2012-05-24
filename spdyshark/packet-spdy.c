@@ -756,6 +756,7 @@ static int dissect_spdy_data_frame(tvbuff_t *tvb, int offset,
   guint8 flags;
   guint32 frame_length;
   proto_item *ti;
+  proto_item *flags_ti;
   proto_tree *flags_tree;
   guint32 reported_datalen;
   guint32 datalen;
@@ -779,48 +780,56 @@ static int dissect_spdy_data_frame(tvbuff_t *tvb, int offset,
   col_add_fstr(pinfo->cinfo, COL_INFO, "DATA[%u] length=%d",
                stream_id, frame_length);
 
-  proto_item_append_text(spdy_proto, ":%s stream=%d length=%d",
-                         flags & SPDY_FLAG_FIN ? " [FIN]" : "", stream_id,
-                         frame_length);
+  if (spdy_tree) {
+    /* Add frame description. */
+    proto_item_append_text(spdy_proto, ":%s stream=%d length=%d",
+                           flags & SPDY_FLAG_FIN ? " [FIN]" : "", stream_id,
+                           frame_length);
 
-  /* Add control bit. */
-  dissect_spdy_control_bit(tvb, offset, spdy_tree);
+    /* Add control bit. */
+    dissect_spdy_control_bit(tvb, offset, spdy_tree);
 
-  /* Add stream ID. */
-  proto_tree_add_item(spdy_tree,
-                      hf_spdy_streamid,
-                      tvb,
-                      offset,
-                      4,
-                      ENC_BIG_ENDIAN);
+    /* Add stream ID. */
+    proto_tree_add_item(spdy_tree,
+                        hf_spdy_streamid,
+                        tvb,
+                        offset,
+                        4,
+                        ENC_BIG_ENDIAN);
 
-  /* Add data. */
-  proto_tree_add_item(spdy_tree,
-                      hf_spdy_data,
-                      tvb, offset + 8,
-                      frame_length,
-                      ENC_NA);
+    /* Add flags. */
+    flags_ti = proto_tree_add_item(spdy_tree,
+                                   hf_spdy_flags,
+                                   tvb,
+                                   offset + 4,
+                                   1,
+                                   ENC_BIG_ENDIAN);
+    flags_tree = proto_item_add_subtree(flags_ti, ett_spdy_flags);
+    proto_tree_add_item(flags_tree,
+                        hf_spdy_flags_fin,
+                        tvb,
+                        offset + 4,
+                        1,
+                        ENC_BIG_ENDIAN);
+    if (flags & SPDY_FLAG_FIN) {
+      proto_item_append_text(flags_ti, " (FIN)");
+    }
 
-  /* Add flags. */
-  ti = proto_tree_add_uint_format(spdy_tree, hf_spdy_flags, tvb, offset+4, 1,
-                                  flags, "Flags: 0x%02x%s", flags,
-                                  flags&SPDY_FLAG_FIN ? " (FIN)" : "");
+    /* Add length. */
+    proto_tree_add_item(spdy_tree,
+                        hf_spdy_length,
+                        tvb,
+                        offset + 5,
+                        3,
+                        ENC_BIG_ENDIAN);
 
-  flags_tree = proto_item_add_subtree(ti, ett_spdy_flags);
-  proto_tree_add_item(flags_tree,
-                      hf_spdy_flags_fin,
-                      tvb,
-                      offset + 4,
-                      1,
-                      ENC_BIG_ENDIAN);
-
-  /* Add length. */
-  proto_tree_add_item(spdy_tree,
-                      hf_spdy_length,
-                      tvb,
-                      offset + 5,
-                      3,
-                      ENC_BIG_ENDIAN);
+    /* Add data. */
+    proto_tree_add_item(spdy_tree,
+                        hf_spdy_data,
+                        tvb, offset + 8,
+                        frame_length,
+                        ENC_NA);
+  }
 
   datalen = tvb_length_remaining(tvb, offset);
   if (datalen > frame_length) {
@@ -1367,6 +1376,7 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
   const char          *frame_type_name;
   proto_tree          *spdy_tree = NULL;
   proto_item          *ti = NULL;
+  proto_item          *flags_ti = NULL;
   proto_item          *spdy_proto = NULL;
   int                 orig_offset;
   int                 hdr_offset = 0;
@@ -1449,8 +1459,13 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
   }
 
   if (!control_bit) {
-    return dissect_spdy_data_frame(tvb, orig_offset, pinfo, tree,
-                                   spdy_tree, spdy_proto, conv_data);
+    return dissect_spdy_data_frame(tvb,
+                                   orig_offset,
+                                   pinfo,
+                                   tree,
+                                   spdy_tree,
+                                   spdy_proto,
+                                   conv_data);
   }
   if (spdy_debug) {
       printf("Control frame [version=%d type=%d flags=0x%x length=%d]\n",
@@ -1482,6 +1497,23 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
                         orig_offset + 2,
                         2,
                         ENC_BIG_ENDIAN);
+
+    /* Add flags. */
+    flags_ti = proto_tree_add_item(spdy_tree,
+                                   hf_spdy_flags,
+                                   tvb,
+                                   orig_offset + 4,
+                                   1,
+                                   ENC_BIG_ENDIAN);
+    flags_tree = proto_item_add_subtree(flags_ti, ett_spdy_flags);
+
+    /* Add length. */
+    proto_tree_add_item(spdy_tree,
+                        hf_spdy_length,
+                        tvb,
+                        orig_offset+5,
+                        3,
+                        ENC_BIG_ENDIAN);
   }
 
   switch (frame_type) {
@@ -1494,6 +1526,7 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
 
       /* Get SYN_STREAM-only fields. */
       if (frame_type == SPDY_SYN_STREAM) {
+        /* Get associated stream ID. */
         associated_stream_id = tvb_get_bits32(tvb, (offset << 3) + 1, 31,
                                               FALSE);
         offset += 4;
@@ -1506,19 +1539,18 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
 
       /* Populate tree. */
       if (tree) {
-
-        /* Add flags. */
-        ti = proto_tree_add_uint_format(spdy_tree, hf_spdy_flags, tvb,
-                                        orig_offset+4, 1, flags,
-                                        "Flags: 0x%02x%s", flags,
-                                        flags&SPDY_FLAG_FIN ? " (FIN)" : "");
-        flags_tree = proto_item_add_subtree(ti, ett_spdy_flags);
+        /* Add FIN flag. */
         proto_tree_add_item(flags_tree,
                             hf_spdy_flags_fin,
                             tvb,
                             offset + 4,
                             1,
                             ENC_BIG_ENDIAN);
+        if (flags & SPDY_FLAG_FIN) {
+          proto_item_append_text(flags_ti, " (FIN)");
+        }
+
+        /* Add unidirectional flag, only applicable for SYN_STREAM. */
         if (frame_type == SPDY_SYN_STREAM) {
           proto_tree_add_item(flags_tree,
                               hf_spdy_flags_unidirectional,
@@ -1526,15 +1558,10 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
                               offset + 4,
                               1,
                               ENC_BIG_ENDIAN);
+          if (flags & SPDY_FLAG_UNIDIRECTIONAL) {
+            proto_item_append_text(flags_ti, " (UNIDIRECTIONAL)");
+          }
         }
-
-        /* Add length. */
-        proto_tree_add_item(spdy_tree,
-                            hf_spdy_length,
-                            tvb,
-                            orig_offset+5,
-                            3,
-                            ENC_BIG_ENDIAN);
 
         /* Add stream ID. */
         proto_tree_add_item(spdy_tree,
