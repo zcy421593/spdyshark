@@ -60,8 +60,8 @@
 #define SPDY_FLAG_CLEAR_SETTINGS 0x01 /* TODO(hkhalil): Use. */
 
 /* Flags for each setting in a SETTINGS frame. */
-#define SPDY_SETTING_FLAG_PERSIST_VALUE 0x01 /* TODO(hkhalil): Use. */
-#define SPDY_SETTING_FLAG_PERSISTED 0x02 /* TODO(hkhalil): Use. */
+#define SPDY_FLAG_PERSIST_VALUE 0x01
+#define SPDY_FLAG_PERSISTED 0x02
 
 #define TCP_PORT_SPDY 6121
 #define SSL_PORT_SPDY 443
@@ -185,6 +185,8 @@ static int hf_spdy_type = -1;
 static int hf_spdy_flags = -1;
 static int hf_spdy_flags_fin = -1;
 static int hf_spdy_flags_unidirectional = -1;
+static int hf_spdy_flags_persist_value = -1;
+static int hf_spdy_flags_persisted = -1;
 static int hf_spdy_length = -1;
 static int hf_spdy_header = -1;
 static int hf_spdy_header_name = -1;
@@ -194,10 +196,15 @@ static int hf_spdy_associated_streamid = -1;
 static int hf_spdy_priority = -1;
 static int hf_spdy_num_headers = -1;
 static int hf_spdy_num_headers_string = -1;
+static int hf_spdy_num_settings = -1;
+static int hf_spdy_setting = -1;
+static int hf_spdy_setting_id = -1;
+static int hf_spdy_setting_value = -1;
 
 static gint ett_spdy = -1;
 static gint ett_spdy_flags = -1;
 static gint ett_spdy_header = -1;
+static gint ett_spdy_setting = -1;
 
 static gint ett_spdy_encoded_entity = -1;
 
@@ -1057,6 +1064,111 @@ body_dissected:
   return frame_length + 8;
 }
 
+static int dissect_spdy_settings(tvbuff_t *tvb,
+                                 int offset,
+                                 const int length,
+                                 proto_tree *frame_tree) {
+  int num_entries;
+  proto_item *ti;
+  proto_tree *setting_tree;
+  proto_tree *flags_tree;
+
+
+  /* Make sure that we have enough room for our number of entries field. */
+  if (length < 4) {
+    if (spdy_debug) {
+      printf("SETTINGS frame too small for number of entries field.\n");
+    }
+    return -1;
+  }
+
+  /* Get number of entries, and make sure we have enough room for them. */
+  num_entries = tvb_get_ntohl(tvb, offset);
+  if (length < num_entries * 8) {
+    if (spdy_debug) {
+      printf("SETTINGS frame too small [num_entries=%d]\n", num_entries);
+    }
+    return -1;
+  }
+  if (spdy_debug) {
+    printf("Dissecting %d settings from SETTINGS frame.\n", num_entries);
+  }
+  if (frame_tree) {
+    proto_tree_add_item(frame_tree,
+                        hf_spdy_num_settings,
+                        tvb,
+                        offset,
+                        4,
+                        ENC_BIG_ENDIAN);
+  }
+  offset += 4;
+
+  /* Dissect each entry. */
+  while (num_entries > 0) {
+    if (frame_tree) {
+      /* Create key/value pair subtree. */
+      ti = proto_tree_add_item(frame_tree,
+                               hf_spdy_setting,
+                               tvb,
+                               offset,
+                               8,
+                               ENC_NA);
+      /* TODO(hkhalil): Prettier output for setting sub-tree description. */
+      setting_tree = proto_item_add_subtree(ti, ett_spdy_setting);
+
+      /* Set flags. */
+      ti = proto_tree_add_item(setting_tree,
+                               hf_spdy_flags,
+                               tvb,
+                               offset,
+                               1,
+                               ENC_NA);
+      /* TODO(hkhalil): Prettier output for flags sub-tree description. */
+      flags_tree = proto_item_add_subtree(ti, ett_spdy_flags);
+      proto_tree_add_item(flags_tree,
+                          hf_spdy_flags_persist_value,
+                          tvb,
+                          offset,
+                          1,
+                          ENC_BIG_ENDIAN);
+      proto_tree_add_item(flags_tree,
+                          hf_spdy_flags_persisted,
+                          tvb,
+                          offset,
+                          1,
+                          ENC_BIG_ENDIAN);
+      offset += 1;
+
+      /* Set ID. */
+      proto_tree_add_item(setting_tree,
+                          hf_spdy_setting_id,
+                          tvb,
+                          offset,
+                          3,
+                          ENC_BIG_ENDIAN);
+      /* TODO(hkhalil): Prettier output for setting IDs. */
+      offset += 3;
+
+      /* Set Value. */
+      proto_tree_add_item(setting_tree,
+                          hf_spdy_setting_value,
+                          tvb,
+                          offset,
+                          4,
+                          ENC_BIG_ENDIAN);
+      offset += 4;
+
+    } else {
+      offset += 8;
+    }
+
+    /* Increment. */
+    --num_entries;
+  }
+
+  return length;
+}
+
 /*
  * Performs header decompression.
  */
@@ -1327,8 +1439,12 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
 
   /* Create SPDY tree elements. */
   if (tree) {
-    spdy_proto = proto_tree_add_item(tree, proto_spdy, tvb, orig_offset,
-                                     frame_length+8, FALSE);
+    spdy_proto = proto_tree_add_item(tree,
+                                     proto_spdy,
+                                     tvb,
+                                     orig_offset,
+                                     frame_length + 8,
+                                     ENC_NA);
     spdy_tree = proto_item_add_subtree(spdy_proto, ett_spdy);
   }
 
@@ -1476,7 +1592,9 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
       break;
 
     case SPDY_SETTINGS:
-      /* TODO(ers) fill in tree and summary */
+      if (0 > dissect_spdy_settings(tvb, offset, frame_length, spdy_tree)) {
+        return -1;
+      }
       break;
 
     case SPDY_NOOP:
@@ -1865,6 +1983,20 @@ void proto_register_spdy(void) {
         NULL, HFILL
       }
     },
+    { &hf_spdy_flags_persist_value,
+      { "Persist Value",  "spdy.flags.persist_value",
+        FT_BOOLEAN, 8,
+        TFS(&tfs_spdy_set_notset), SPDY_FLAG_PERSIST_VALUE,
+        NULL, HFILL
+      }
+    },
+    { &hf_spdy_flags_persisted,
+      { "Persisted",      "spdy.flags.persisted",
+        FT_BOOLEAN, 8,
+        TFS(&tfs_spdy_set_notset), SPDY_FLAG_PERSISTED,
+        NULL, HFILL
+      }
+    },
     { &hf_spdy_length,
       { "Length",         "spdy.length",
         FT_UINT24, BASE_DEC, NULL, 0x0,
@@ -1919,11 +2051,36 @@ void proto_register_spdy(void) {
           "", HFILL
       }
     },
+    { &hf_spdy_num_settings,
+      { "Number of Settings", "spdy.num_settings",
+          FT_UINT32, BASE_DEC, NULL, 0x0,
+          "", HFILL
+      }
+    },
+    { &hf_spdy_setting,
+      { "Setting",        "spdy.setting",
+          FT_BYTES, BASE_NONE, NULL, 0x0,
+          NULL, HFILL
+      }
+    },
+    { &hf_spdy_setting_id,
+      { "ID",             "spdy.setting.id",
+          FT_UINT32, BASE_DEC, NULL, 0x0,
+          "", HFILL
+      }
+    },
+    { &hf_spdy_setting_value,
+      { "Value",          "spdy.setting.value",
+          FT_UINT32, BASE_DEC, NULL, 0x0,
+          "", HFILL
+      }
+    },
   };
   static gint *ett[] = {
     &ett_spdy,
     &ett_spdy_flags,
     &ett_spdy_header,
+    &ett_spdy_setting,
     &ett_spdy_encoded_entity,
   };
 
