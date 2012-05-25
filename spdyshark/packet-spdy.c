@@ -140,6 +140,16 @@ static const char *rst_stream_status_names[] = {
     "INVALID"
 };
 
+static const value_string setting_id_names[] = {
+  { 1, "UPLOAD_BANDWIDTH" },
+  { 2, "DOWNLOAD_BANDWIDTH" },
+  { 3, "ROUND_TRIP_TIME" },
+  { 4, "MAX_CONCURRENT_STREAMS" },
+  { 5, "CURRENT_CWND" },
+  { 6, "DOWNLOAD_RETRANS_RATE" },
+  { 7, "INITIAL_WINDOW_SIZE" },
+};
+
 /*
  * This structure will be tied to each SPDY frame.
  * Note that there may be multiple SPDY frames
@@ -1096,66 +1106,81 @@ static int dissect_spdy_settings(tvbuff_t *tvb,
   offset += 4;
 
   /* Dissect each entry. */
-  while (num_entries > 0) {
-    if (frame_tree) {
-      /* Create key/value pair subtree. */
-      ti = proto_tree_add_item(frame_tree,
-                               hf_spdy_setting,
-                               tvb,
-                               offset,
-                               8,
-                               ENC_NA);
-      /* TODO(hkhalil): Prettier output for setting sub-tree description. */
-      setting_tree = proto_item_add_subtree(ti, ett_spdy_setting);
+  if (num_entries > 0) {
+    /* Add description start. */
+    proto_item_append_text(frame_tree, " [");
 
-      /* Set flags. */
-      ti = proto_tree_add_item(setting_tree,
-                               hf_spdy_flags,
-                               tvb,
-                               offset,
-                               1,
-                               ENC_NA);
-      /* TODO(hkhalil): Prettier output for flags sub-tree description. */
-      flags_tree = proto_item_add_subtree(ti, ett_spdy_flags);
-      proto_tree_add_item(flags_tree,
-                          hf_spdy_flags_persist_value,
-                          tvb,
-                          offset,
-                          1,
-                          ENC_BIG_ENDIAN);
-      proto_tree_add_item(flags_tree,
-                          hf_spdy_flags_persisted,
-                          tvb,
-                          offset,
-                          1,
-                          ENC_BIG_ENDIAN);
-      offset += 1;
+    while (num_entries > 0) {
+      if (frame_tree) {
+        /* Create key/value pair subtree. */
+        ti = proto_tree_add_item(frame_tree,
+                                 hf_spdy_setting,
+                                 tvb,
+                                 offset,
+                                 8,
+                                 ENC_NA);
+        /* TODO(hkhalil): Prettier output for setting sub-tree description. */
+        setting_tree = proto_item_add_subtree(ti, ett_spdy_setting);
 
-      /* Set ID. */
-      proto_tree_add_item(setting_tree,
-                          hf_spdy_setting_id,
-                          tvb,
-                          offset,
-                          3,
-                          ENC_BIG_ENDIAN);
-      /* TODO(hkhalil): Prettier output for setting IDs. */
-      offset += 3;
+        /* Set flags. */
+        ti = proto_tree_add_item(setting_tree,
+                                 hf_spdy_flags,
+                                 tvb,
+                                 offset,
+                                 1,
+                                 ENC_NA);
+        /* TODO(hkhalil): Prettier output for flags sub-tree description. */
+        flags_tree = proto_item_add_subtree(ti, ett_spdy_flags);
+        proto_tree_add_item(flags_tree,
+                            hf_spdy_flags_persist_value,
+                            tvb,
+                            offset,
+                            1,
+                            ENC_BIG_ENDIAN);
+        proto_tree_add_item(flags_tree,
+                            hf_spdy_flags_persisted,
+                            tvb,
+                            offset,
+                            1,
+                            ENC_BIG_ENDIAN);
+        offset += 1;
 
-      /* Set Value. */
-      proto_tree_add_item(setting_tree,
-                          hf_spdy_setting_value,
-                          tvb,
-                          offset,
-                          4,
-                          ENC_BIG_ENDIAN);
-      offset += 4;
+        /* Set ID. */
+        proto_tree_add_item(setting_tree,
+                            hf_spdy_setting_id,
+                            tvb,
+                            offset,
+                            3,
+                            ENC_BIG_ENDIAN);
+        proto_item_append_text(frame_tree,
+                               "%s",
+                               val_to_str(tvb_get_ntoh24(tvb, offset),
+                                          setting_id_names,
+                                          "Unknown(%d)"));
+        if (num_entries != 1) {
+          proto_item_append_text(frame_tree, ", ");
+        }
+        offset += 3;
 
-    } else {
-      offset += 8;
+        /* Set Value. */
+        proto_tree_add_item(setting_tree,
+                            hf_spdy_setting_value,
+                            tvb,
+                            offset,
+                            4,
+                            ENC_BIG_ENDIAN);
+        offset += 4;
+
+      } else {
+        offset += 8;
+      }
+
+      /* Increment. */
+      --num_entries;
     }
 
-    /* Increment. */
-    --num_entries;
+    /* Add description end. */
+    proto_item_append_text(frame_tree, "]");
   }
 
   return length;
@@ -2100,8 +2125,8 @@ void proto_register_spdy(void) {
     },
     { &hf_spdy_setting_id,
       { "ID",             "spdy.setting.id",
-          FT_UINT32, BASE_DEC, NULL, 0x0,
-          "", HFILL
+          FT_UINT24, BASE_DEC, VALS(setting_id_names), 0x0,
+          NULL, HFILL
       }
     },
     { &hf_spdy_setting_value,
