@@ -138,12 +138,12 @@ static const value_string setting_id_names[] = {
  * Note that there may be multiple SPDY frames
  * in one packet.
  */
-typedef struct _spdy_frame_info_t {
+typedef struct _spdy_header_info_t {
     guint32 stream_id;
     guint8 *header_block;
     guint   header_block_len;
     guint16 frame_type;
-} spdy_frame_info_t;
+} spdy_header_info_t;
 
 /*
  * This structures keeps track of all the data frames
@@ -1272,36 +1272,36 @@ static void spdy_p_remove_proto_data(frame_data *fd, int proto) {
 /*
  * Saves state on header data for a given stream.
  */
-static spdy_frame_info_t* spdy_save_header_block(frame_data *fd,
+static spdy_header_info_t* spdy_save_header_block(frame_data *fd,
                                                   guint32 stream_id,
                                                   guint16 frame_type,
                                                   guint8 *header,
                                                   guint length) {
   GSList *filist = p_get_proto_data(fd, proto_spdy);
-  spdy_frame_info_t *frame_info = se_alloc(sizeof(spdy_frame_info_t));
+  spdy_header_info_t *header_info = se_alloc(sizeof(spdy_header_info_t));
   if (filist != NULL)
     spdy_p_remove_proto_data(fd, proto_spdy);
-  frame_info->stream_id = stream_id;
-  frame_info->header_block = header;
-  frame_info->header_block_len = length;
-  frame_info->frame_type = frame_type;
-  filist = g_slist_append(filist, frame_info);
+  header_info->stream_id = stream_id;
+  header_info->header_block = header;
+  header_info->header_block_len = length;
+  header_info->frame_type = frame_type;
+  filist = g_slist_append(filist, header_info);
   p_add_proto_data(fd, proto_spdy, filist);
-  return frame_info;
+  return header_info;
   /* TODO(ers) these need to get deleted when no longer needed */
 }
 
 /*
  * Retrieves saved state for a given stream.
  */
-static spdy_frame_info_t* spdy_find_saved_header_block(frame_data *fd,
-                                                       guint32 stream_id,
-                                                       guint16 frame_type) {
+static spdy_header_info_t* spdy_find_saved_header_block(frame_data *fd,
+                                                        guint32 stream_id,
+                                                        guint16 frame_type) {
   GSList *filist = p_get_proto_data(fd, proto_spdy);
   while (filist != NULL) {
-      spdy_frame_info_t *fi = filist->data;
-      if (fi->stream_id == stream_id && fi->frame_type == frame_type)
-          return fi;
+      spdy_header_info_t *hi = filist->data;
+      if (hi->stream_id == stream_id && hi->frame_type == frame_type)
+          return hi;
       filist = g_slist_next(filist);
   }
   return NULL;
@@ -1662,18 +1662,18 @@ int dissect_spdy_frame(tvbuff_t *tvb,
         header_tvb = tvb;
         hdr_offset = offset;
     } else {
-      spdy_frame_info_t *per_frame_info;
+      spdy_header_info_t *header_info;
 
       /* First attempt to find previously decompressed data.
        * This will not work correctly for lower-level frames that contain more
        * than one SPDY frame of the same type. We assume this to never be the
        * case, though. */
-      per_frame_info = spdy_find_saved_header_block(pinfo->fd,
-                                                    stream_id,
-                                                    frame_type);
+      header_info = spdy_find_saved_header_block(pinfo->fd,
+                                                 stream_id,
+                                                 frame_type);
 
       /* Generate decompressed data and store it, since none was found. */
-      if (per_frame_info == NULL) {
+      if (header_info == NULL) {
         guint uncomp_length = 0;
         z_streamp decomp;
         guint8 *uncomp_ptr;
@@ -1717,18 +1717,18 @@ int dissect_spdy_frame(tvbuff_t *tvb,
         }
 
         /* Store decompressed data. */
-        per_frame_info = spdy_save_header_block(pinfo->fd,
-                                                stream_id,
-                                                frame_type,
-                                                uncomp_ptr,
-                                                uncomp_length);
+        header_info = spdy_save_header_block(pinfo->fd,
+                                             stream_id,
+                                             frame_type,
+                                             uncomp_ptr,
+                                             uncomp_length);
       }
 
       /* Create a tvb containing the uncompressed data. */
       header_tvb = tvb_new_child_real_data(tvb,
-                                           per_frame_info->header_block,
-                                           per_frame_info->header_block_len,
-                                           per_frame_info->header_block_len);
+                                           header_info->header_block,
+                                           header_info->header_block_len,
+                                           header_info->header_block_len);
       add_new_data_source(pinfo, header_tvb, "Uncompressed headers");
       hdr_offset = 0;
     }
