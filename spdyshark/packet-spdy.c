@@ -1068,6 +1068,7 @@ body_dissected:
 
 static int dissect_spdy_settings(tvbuff_t *tvb,
                                  int offset,
+                                 packet_info *pinfo,
                                  const int length,
                                  proto_tree *frame_tree) {
   int num_entries;
@@ -1078,18 +1079,18 @@ static int dissect_spdy_settings(tvbuff_t *tvb,
 
   /* Make sure that we have enough room for our number of entries field. */
   if (length < 4) {
-    if (spdy_debug) {
-      printf("SETTINGS frame too small for number of entries field.\n");
-    }
+    expert_add_info_format(pinfo, frame_tree, PI_MALFORMED, PI_ERROR,
+                           "SETTINGS frame too small for number of entries "
+                           "field.");
     return -1;
   }
 
   /* Get number of entries, and make sure we have enough room for them. */
   num_entries = tvb_get_ntohl(tvb, offset);
   if (length < num_entries * 8) {
-    if (spdy_debug) {
-      printf("SETTINGS frame too small [num_entries=%d]\n", num_entries);
-    }
+    expert_add_info_format(pinfo, frame_tree, PI_MALFORMED, PI_ERROR,
+                           "SETTINGS frame too small [num_entries=%d]",
+                           num_entries);
     return -1;
   }
   if (spdy_debug) {
@@ -1383,10 +1384,9 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
    * Minimum size for a SPDY frame is 8 bytes.
    */
   if (tvb_length_remaining(tvb, offset) < 8) {
-    if (spdy_debug) {
-      printf("Reported length remaining too small (%d < 8)\n",
-             tvb_length_remaining(tvb, offset));
-    }
+    expert_add_info_format(pinfo, tree, PI_MALFORMED, PI_ERROR,
+                           "Reported length remaining too small (%d < 8)",
+                           tvb_length_remaining(tvb, offset));
     return -1;
   }
 
@@ -1403,9 +1403,9 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
     version = tvb_get_bits16(tvb, (offset << 3) + 1, 15, FALSE);
     frame_type = tvb_get_ntohs(tvb, offset + 2);
     if (frame_type >= SPDY_INVALID) {
-      if (spdy_debug) {
-        printf("Invalid SPDY control frame type: %d\n", frame_type);
-      }
+      expert_add_info_format(pinfo, tree, PI_PROTOCOL, PI_ERROR,
+                             "Invalid SPDY control frame type: %d",
+                             frame_type);
       return -1;
     }
     frame_header = ep_tvb_memdup(tvb, offset, 8);
@@ -1424,10 +1424,9 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
    * Make sure there's as much data as the frame header says there is.
    */
   if ((guint)tvb_length_remaining(tvb, offset) < frame_length) {
-    if (spdy_debug) {
-      printf("Not enough frame data: %d vs. %d\n",
-              frame_length, tvb_length_remaining(tvb, offset));
-    }
+    expert_add_info_format(pinfo, tree, PI_MALFORMED, PI_ERROR,
+                           "Not enough frame data: %d vs. %d",
+                           frame_length, tvb_length_remaining(tvb, offset));
     return -1;
   }
 
@@ -1603,9 +1602,9 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
       if (rst_status >= INVALID_UPPER_BOUND ||
           rst_status <= INVALID_LOWER_BOUND) {
         /* Handle boundary conditions. */
-        if (spdy_debug) {
-          printf("Invalid status code for RST_STREAM: %u", rst_status);
-        }
+        expert_add_info_format(pinfo, spdy_tree, PI_PROTOCOL, PI_ERROR,
+                               "Invalid status code for RST_STREAM: %u",
+                               rst_status);
       } else {
         col_append_fstr(pinfo->cinfo, COL_INFO, " %s",
                         rst_stream_status_names[rst_status]);
@@ -1614,7 +1613,8 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
       break;
 
     case SPDY_SETTINGS:
-      if (0 > dissect_spdy_settings(tvb, offset, frame_length, spdy_tree)) {
+      if (0 > dissect_spdy_settings(tvb, offset, pinfo, frame_length,
+                                    spdy_tree)) {
         return -1;
       }
       break;
@@ -1626,9 +1626,6 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
       ping_id = tvb_get_ntohl(tvb, offset);
       offset += 4;
       col_append_fstr(pinfo->cinfo, COL_INFO, " ID=%u", ping_id);
-      if (spdy_debug) {
-        printf("Got PING ID %d", ping_id);
-      }
       break;
 
     case SPDY_GOAWAY:
@@ -1655,9 +1652,8 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
       break;
 
     default:
-      if (spdy_debug) {
-        printf("Unhandled SPDY frame type: %d\n", frame_type);
-      }
+      expert_add_info_format(pinfo, spdy_tree, PI_MALFORMED, PI_ERROR,
+                             "Unhandled SPDY frame type: %d", frame_type);
       return -1;
       break;
   }
@@ -1735,9 +1731,8 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
 
         /* Catch decompression failures. */
         if (uncomp_ptr == NULL) {
-          if (spdy_debug) {
-              printf("Frame #%d: Inflation failed. Aborting.\n", pinfo->fd->num);
-          }
+          expert_add_info_format(pinfo, spdy_tree, PI_UNDECODED, PI_ERROR,
+                                 "Inflation failed. Aborting.");
           if (spdy_proto) {
             proto_item_append_text(spdy_proto,
                                    " [Error: Header decompression failed]");
@@ -1779,8 +1774,10 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
 
   /* TODO(hkhalil): Remove this escape hatch, process headers as possible. */
   if (num_headers > frame_length) {
-    printf("Number of headers is greater than frame length!\n");
-    proto_item_append_text(ti, " [Error: Number of headers is larger than "
+    expert_add_info_format(pinfo, spdy_tree, PI_MALFORMED, PI_ERROR,
+                           "Number of headers is greater than frame length!");
+    proto_item_append_text(ti,
+                           " [Error: Number of headers is larger than "
                            "frame length]");
     col_append_fstr(pinfo->cinfo, COL_INFO, "%s[%u]", frame_type_name,
                     stream_id);
