@@ -134,9 +134,9 @@ static const value_string setting_id_names[] = {
 };
 
 /*
- * This structure will be tied to each SPDY frame.
- * Note that there may be multiple SPDY frames
- * in one packet.
+ * This structure will be tied to each SPDY header frame.
+ * Only applies to frames containing headers: SYN_STREAM, SYN_REPLY, HEADERS
+ * Note that there may be multiple SPDY frames in one packet.
  */
 typedef struct _spdy_header_info_t {
     guint32 stream_id;
