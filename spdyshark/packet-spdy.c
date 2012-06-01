@@ -108,36 +108,19 @@ static const char *frame_type_names[] = {
     "INVALID"
 };
 
-typedef enum _spdy_rst_stream_status {
-    INVALID_LOWER_BOUND = 0, /* Invalid value, lower bound for enum. */
-    PROTOCOL_ERROR,
-    INVALID_STREAM,
-    REFUSED_STREAM,
-    UNSUPPORTED_VERSION,
-    CANCEL,
-    INTERNAL_ERROR,
-    FLOW_CONTROL_ERROR,
-    STREAM_IN_USE,
-    STREAM_ALREADY_CLOSED,
-    INVALID_CREDENTIALS,
-    FRAME_TOO_LARGE,
-    INVALID_UPPER_BOUND /* Invalid value, upper bound for enum. */
-} spdy_rst_stream_status_t;
-
-static const char *rst_stream_status_names[] = {
-    "INVALID",
-    "PROTOCOL_ERROR",
-    "INVALID_STREAM",
-    "REFUSED_STREAM",
-    "UNSUPPORTED_VERSION",
-    "CANCEL",
-    "INTERNAL_ERROR",
-    "FLOW_CONTROL_ERROR",
-    "STREAM_IN_USE",
-    "STREAM_ALREADY_CLOSED",
-    "INVALID_CREDENTIALS",
-    "FRAME_TOO_LARGE",
-    "INVALID"
+static const value_string rst_stream_status_names[] = {
+  { 1,  "PROTOCOL_ERROR" },
+  { 2,  "INVALID_STREAM" },
+  { 3,  "REFUSED_STREAM" },
+  { 4,  "UNSUPPORTED_VERSION" },
+  { 5,  "CANCEL" },
+  { 6,  "INTERNAL_ERROR" },
+  { 7,  "FLOW_CONTROL_ERROR" },
+  { 8,  "STREAM_IN_USE" },
+  { 9,  "STREAM_ALREADY_CLOSED" },
+  { 10, "INVALID_CREDENTIALS" },
+  { 11, "FRAME_TOO_LARGE" },
+  { 12, "INVALID" },
 };
 
 static const value_string setting_id_names[] = {
@@ -825,16 +808,16 @@ static void dissect_spdy_flags(tvbuff_t *tvb,
 /*
  * Performs DATA frame payload dissection.
  */
-static int dissect_spdy_data_frame(tvbuff_t *tvb,
-                                   int offset,
-                                   packet_info *pinfo,
-                                   proto_tree *top_level_tree,
-                                   proto_tree *spdy_tree,
-                                   proto_item *spdy_proto,
-                                   spdy_conv_t *conv_data,
-                                   guint32 stream_id,
-                                   guint8 flags,
-                                   guint32 frame_length) {
+static int dissect_spdy_data_payload(tvbuff_t *tvb,
+                                     int offset,
+                                     packet_info *pinfo,
+                                     proto_tree *top_level_tree,
+                                     proto_tree *spdy_tree,
+                                     proto_item *spdy_proto,
+                                     spdy_conv_t *conv_data,
+                                     guint32 stream_id,
+                                     guint8 flags,
+                                     guint32 frame_length) {
   dissector_table_t media_type_subdissector_table;
   dissector_table_t port_subdissector_table;
   dissector_handle_t handle;
@@ -1372,6 +1355,7 @@ int dissect_spdy_frame(tvbuff_t *tvb,
   gint                priority = 0;
   guint32             num_headers = 0;
   guint32             rst_status;
+  const gchar         *rst_status_str;
   guint32             ping_id;
   guint32             window_update_delta;
   const char          *proto_tag;
@@ -1590,16 +1574,17 @@ int dissect_spdy_frame(tvbuff_t *tvb,
       col_append_fstr(pinfo->cinfo, COL_INFO, "[%d]", stream_id);
 
       rst_status = tvb_get_ntohl(tvb, offset);
-      if (rst_status >= INVALID_UPPER_BOUND ||
-          rst_status <= INVALID_LOWER_BOUND) {
+      if (match_strval(rst_status, rst_stream_status_names) == NULL) {
         /* Handle boundary conditions. */
         expert_add_info_format(pinfo, spdy_tree, PI_PROTOCOL, PI_ERROR,
                                "Invalid status code for RST_STREAM: %u",
                                rst_status);
-      } else {
-        col_append_fstr(pinfo->cinfo, COL_INFO, " %s",
-                        rst_stream_status_names[rst_status]);
       }
+      rst_status_str = val_to_str(rst_status,
+                                  rst_stream_status_names,
+                                  "Unknown (%d)");
+      col_append_fstr(pinfo->cinfo, COL_INFO, " %s", rst_status_str);
+      /* TODO(hkhalil): Add proto item for rst_status). */
       offset += 8;
       break;
 
