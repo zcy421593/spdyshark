@@ -134,6 +134,18 @@ static const value_string setting_id_names[] = {
 };
 
 /*
+ * This structure will be tied to each SPDY frame and is used as an argument for
+ * dissect_spdy_*_payload() functions.
+ */
+typedef struct _spdy_control_frame_info_t {
+  gboolean control_bit;
+  guint16  version;
+  guint16  type;
+  guint8   flags;
+  guint32  length;  /* Actually only 24 bits. */
+} spdy_control_frame_info_t;
+
+/*
  * This structure will be tied to each SPDY header frame.
  * Only applies to frames containing headers: SYN_STREAM, SYN_REPLY, HEADERS
  * Note that there may be multiple SPDY frames in one packet.
@@ -738,8 +750,7 @@ static void dissect_spdy_control_bit(tvbuff_t *tvb,
 static void dissect_spdy_flags(tvbuff_t *tvb,
                                int offset,
                                proto_tree *frame_tree,
-                               guint16 frame_type) {
-  guint8 flags;
+                               const spdy_control_frame_info_t *frame) {
   proto_item *flags_ti;
   proto_tree *flags_tree;
 
@@ -747,9 +758,6 @@ static void dissect_spdy_flags(tvbuff_t *tvb,
   if (frame_tree == NULL) {
     return;
   }
-
-  /* Get our flags. */
-  flags = tvb_get_guint8(tvb, offset);
 
   /* Create flags substree. */
   flags_ti = proto_tree_add_item(frame_tree,
@@ -761,10 +769,10 @@ static void dissect_spdy_flags(tvbuff_t *tvb,
   flags_tree = proto_item_add_subtree(flags_ti, ett_spdy_flags);
 
   /* Add FIN flag for appropriate frames. */
-  if (frame_type == SPDY_DATA ||
-      frame_type == SPDY_SYN_STREAM ||
-      frame_type == SPDY_SYN_REPLY ||
-      frame_type == SPDY_HEADERS) {
+  if (frame->type == SPDY_DATA ||
+      frame->type == SPDY_SYN_STREAM ||
+      frame->type == SPDY_SYN_REPLY ||
+      frame->type == SPDY_HEADERS) {
     /* Add FIN flag. */
     proto_tree_add_item(flags_tree,
                         hf_spdy_flags_fin,
@@ -772,34 +780,34 @@ static void dissect_spdy_flags(tvbuff_t *tvb,
                         offset,
                         1,
                         ENC_BIG_ENDIAN);
-    if (flags & SPDY_FLAG_FIN) {
+    if (frame->flags & SPDY_FLAG_FIN) {
       proto_item_append_text(frame_tree, " (FIN)");
       proto_item_append_text(flags_ti, " (FIN)");
     }
   }
 
   /* Add UNIDIRECTIONAL flag, only applicable for SYN_STREAM. */
-  if (frame_type == SPDY_SYN_STREAM) {
+  if (frame->type == SPDY_SYN_STREAM) {
     proto_tree_add_item(flags_tree,
                         hf_spdy_flags_unidirectional,
                         tvb,
                         offset,
                         1,
                         ENC_BIG_ENDIAN);
-    if (flags & SPDY_FLAG_UNIDIRECTIONAL) {
+    if (frame->flags & SPDY_FLAG_UNIDIRECTIONAL) {
       proto_item_append_text(flags_ti, " (UNIDIRECTIONAL)");
     }
   }
 
   /* Add CLEAR_SETTINGS flag, only applicable for SETTINGS. */
-  if (frame_type == SPDY_SETTINGS) {
+  if (frame->type == SPDY_SETTINGS) {
     proto_tree_add_item(flags_tree,
                         hf_spdy_flags_clear_settings,
                         tvb,
                         offset,
                         1,
                         ENC_BIG_ENDIAN);
-    if (flags & SPDY_FLAG_SETTINGS_CLEAR_SETTINGS) {
+    if (frame->flags & SPDY_FLAG_SETTINGS_CLEAR_SETTINGS) {
       proto_item_append_text(flags_ti, " (CLEAR)");
     }
   }
@@ -816,8 +824,7 @@ static int dissect_spdy_data_payload(tvbuff_t *tvb,
                                      proto_item *spdy_proto,
                                      spdy_conv_t *conv_data,
                                      guint32 stream_id,
-                                     guint8 flags,
-                                     guint32 frame_length) {
+                                     const spdy_control_frame_info_t *frame) {
   dissector_table_t media_type_subdissector_table;
   dissector_table_t port_subdissector_table;
   dissector_handle_t handle;
@@ -825,24 +832,24 @@ static int dissect_spdy_data_payload(tvbuff_t *tvb,
   gboolean dissected;
 
   col_add_fstr(pinfo->cinfo, COL_INFO, "DATA[%u] length=%d",
-               stream_id, frame_length);
+               stream_id, frame->length);
 
   if (spdy_tree) {
     /* Add frame description. */
     proto_item_append_text(spdy_proto, " stream=%d length=%d",
                            stream_id,
-                           frame_length);
+                           frame->length);
 
     /* Add data. */
     proto_tree_add_item(spdy_tree,
                         hf_spdy_data,
                         tvb, offset,
-                        frame_length,
+                        frame->length,
                         ENC_NA);
   }
 
   num_data_frames = spdy_get_num_data_frames(conv_data, stream_id);
-  if (frame_length != 0 || num_data_frames != 0) {
+  if (frame->length != 0 || num_data_frames != 0) {
     /*
      * There's stuff left over; process it.
      */
@@ -858,18 +865,19 @@ static int dissect_spdy_data_payload(tvbuff_t *tvb,
     /*
      * Create a tvbuff for the payload.
      */
-    if (frame_length != 0) {
-      next_tvb = tvb_new_subset(tvb, offset, frame_length, frame_length);
-      is_single_chunk = num_data_frames == 0 && (flags & SPDY_FLAG_FIN) != 0;
+    if (frame->length != 0) {
+      next_tvb = tvb_new_subset(tvb, offset, frame->length, frame->length);
+      is_single_chunk = num_data_frames == 0 &&
+          (frame->flags & SPDY_FLAG_FIN) != 0;
       if (!pinfo->fd->flags.visited) {
         if (!is_single_chunk) {
           if (spdy_assemble_entity_bodies) {
-            copied_data = tvb_memdup(next_tvb, 0, frame_length);
+            copied_data = tvb_memdup(next_tvb, 0, frame->length);
             spdy_add_data_chunk(conv_data,
                                 stream_id,
                                 pinfo->fd->num,
                                 copied_data,
-                                frame_length);
+                                frame->length);
           } else {
             spdy_increment_data_chunk_count(conv_data, stream_id);
           }
@@ -879,7 +887,7 @@ static int dissect_spdy_data_payload(tvbuff_t *tvb,
       is_single_chunk = (num_data_frames == 1);
     }
 
-    if (!(flags & SPDY_FLAG_FIN)) {
+    if (!(frame->flags & SPDY_FLAG_FIN)) {
       col_set_fence(pinfo->cinfo, COL_INFO);
       col_add_fstr(pinfo->cinfo, COL_INFO, " (partial entity)");
       proto_item_append_text(spdy_proto, " (partial entity body)");
@@ -1058,27 +1066,28 @@ body_dissected:
         pinfo->private_data = save_private_data;
     }
     /*
-     * We've processed frame_length bytes worth of data
+     * We've processed frame->length bytes worth of data
      * (which may be no data at all); advance the
      * offset past whatever data we've processed.
      */
   }
-  return frame_length;
+  return frame->length;
 }
 
-static int dissect_spdy_settings_payload(tvbuff_t *tvb,
-                                         int offset,
-                                         packet_info *pinfo,
-                                         const int length,
-                                         proto_tree *frame_tree) {
-  int num_entries;
+static int dissect_spdy_settings_payload(
+    tvbuff_t *tvb,
+    int offset,
+    packet_info *pinfo,
+    proto_tree *frame_tree,
+    const spdy_control_frame_info_t *frame) {
+  guint32 num_entries;
   proto_item *ti;
   proto_tree *setting_tree;
   proto_tree *flags_tree;
 
 
   /* Make sure that we have enough room for our number of entries field. */
-  if (length < 4) {
+  if (frame->length < 4) {
     expert_add_info_format(pinfo, frame_tree, PI_MALFORMED, PI_ERROR,
                            "SETTINGS frame too small for number of entries "
                            "field.");
@@ -1087,7 +1096,7 @@ static int dissect_spdy_settings_payload(tvbuff_t *tvb,
 
   /* Get number of entries, and make sure we have enough room for them. */
   num_entries = tvb_get_ntohl(tvb, offset);
-  if (length < num_entries * 8) {
+  if (frame->length < num_entries * 8) {
     expert_add_info_format(pinfo, frame_tree, PI_MALFORMED, PI_ERROR,
                            "SETTINGS frame too small [num_entries=%d]",
                            num_entries);
@@ -1181,7 +1190,7 @@ static int dissect_spdy_settings_payload(tvbuff_t *tvb,
     proto_item_append_text(frame_tree, "]");
   }
 
-  return length;
+  return frame->length;
 }
 
 /*
@@ -1346,10 +1355,7 @@ int dissect_spdy_frame(tvbuff_t *tvb,
                        proto_tree *tree,
                        spdy_conv_t *conv_data) {
   guint8              control_bit;
-  guint16             version = 0;
-  guint16             frame_type;
-  guint8              flags;
-  guint32             frame_length;
+  spdy_control_frame_info_t frame;
   guint32             stream_id = 0;
   guint32             associated_stream_id = 0;
   gint                priority = 0;
@@ -1413,7 +1419,7 @@ int dissect_spdy_frame(tvbuff_t *tvb,
   /* Process first four bytes of frame, formatted depending on control bit. */
   if (control_bit) {
     /* Add version. */
-    version = tvb_get_bits16(tvb, (offset * 8) + 1, 15, FALSE);
+    frame.version = tvb_get_bits16(tvb, (offset * 8) + 1, 15, FALSE);
     if (spdy_tree) {
       proto_tree_add_bits_item(spdy_tree,
                                hf_spdy_version,
@@ -1425,11 +1431,11 @@ int dissect_spdy_frame(tvbuff_t *tvb,
     offset += 2;
 
     /* Add control frame type. */
-    frame_type = tvb_get_ntohs(tvb, offset);
-    if (frame_type >= SPDY_INVALID) {
+    frame.type = tvb_get_ntohs(tvb, offset);
+    if (frame.type >= SPDY_INVALID) {
       expert_add_info_format(pinfo, tree, PI_PROTOCOL, PI_ERROR,
                              "Invalid SPDY control frame type: %d",
-                             frame_type);
+                             frame.type);
       return -1;
     }
     if (spdy_tree) {
@@ -1442,7 +1448,8 @@ int dissect_spdy_frame(tvbuff_t *tvb,
     }
     offset += 2;
   } else {
-    frame_type = SPDY_DATA;
+    frame.type = SPDY_DATA;
+    frame.version = 0; /* Version doesn't apply to DATA. */
 
     /* Add stream ID. */
     stream_id = tvb_get_bits32(tvb, (offset * 8) + 1, 31, ENC_BIG_ENDIAN);
@@ -1458,23 +1465,23 @@ int dissect_spdy_frame(tvbuff_t *tvb,
   }
 
   /* Add frame info. */
-  frame_type_name = frame_type_names[frame_type];
+  frame_type_name = frame_type_names[frame.type];
   col_add_str(pinfo->cinfo, COL_INFO, frame_type_name);
   if (spdy_tree) {
     proto_item_append_text(spdy_tree, ", %s", frame_type_name);
   }
 
   /* Add flags. */
-  flags = tvb_get_guint8(tvb, offset);
+  frame.flags = tvb_get_guint8(tvb, offset);
   if (spdy_tree) {
-    dissect_spdy_flags(tvb, offset, spdy_tree, frame_type);
+    dissect_spdy_flags(tvb, offset, spdy_tree, &frame);
   }
   offset += 1;
 
   /* Add length. */
-  frame_length = tvb_get_ntoh24(tvb, offset);
+  frame.length = tvb_get_ntoh24(tvb, offset);
   if (spdy_tree) {
-    proto_item_set_len(spdy_proto, frame_length + 8);
+    proto_item_set_len(spdy_proto, frame.length + 8);
     proto_tree_add_item(spdy_tree,
                         hf_spdy_length,
                         tvb,
@@ -1487,10 +1494,10 @@ int dissect_spdy_frame(tvbuff_t *tvb,
   /*
    * Make sure there's as much data as the frame header says there is.
    */
-  if ((guint)tvb_length_remaining(tvb, offset) < frame_length) {
+  if ((guint)tvb_length_remaining(tvb, offset) < frame.length) {
     expert_add_info_format(pinfo, tree, PI_MALFORMED, PI_ERROR,
                            "Not enough frame data: %d vs. %d",
-                           frame_length, tvb_length_remaining(tvb, offset));
+                           frame.length, tvb_length_remaining(tvb, offset));
     return -1;
   }
 
@@ -1504,22 +1511,21 @@ int dissect_spdy_frame(tvbuff_t *tvb,
                                               spdy_proto,
                                               conv_data,
                                               stream_id,
-                                              flags,
-                                              frame_length);
+                                              &frame);
   }
 
   /* Abort here if the version is too low. */
-  if (version < MIN_SPDY_VERSION) {
+  if (frame.version < MIN_SPDY_VERSION) {
     if (spdy_tree) {
       proto_item_append_text(spdy_proto, " [Unsupported Version]");
     }
     if (spdy_debug) {
       printf("Unsupported version. Gracefully aborting frame dissection.\n");
     }
-    return frame_length + 8;
+    return frame.length + 8;
   }
 
-  switch (frame_type) {
+  switch (frame.type) {
     case SPDY_SYN_STREAM:
     case SPDY_SYN_REPLY:
     case SPDY_HEADERS:
@@ -1536,7 +1542,7 @@ int dissect_spdy_frame(tvbuff_t *tvb,
       }
 
       /* Get SYN_STREAM-only fields. */
-      if (frame_type == SPDY_SYN_STREAM) {
+      if (frame.type == SPDY_SYN_STREAM) {
         /* Get associated stream ID. */
         associated_stream_id = tvb_get_bits32(tvb, (offset << 3) + 1, 31,
                                               FALSE);
@@ -1589,8 +1595,8 @@ int dissect_spdy_frame(tvbuff_t *tvb,
       break;
 
     case SPDY_SETTINGS:
-      if (0 > dissect_spdy_settings_payload(tvb, offset, pinfo, frame_length,
-                                            spdy_tree)) {
+      if (0 > dissect_spdy_settings_payload(tvb, offset, pinfo, spdy_tree,
+                                            &frame)) {
         return -1;
       }
       break;
@@ -1629,7 +1635,7 @@ int dissect_spdy_frame(tvbuff_t *tvb,
 
     default:
       expert_add_info_format(pinfo, spdy_tree, PI_MALFORMED, PI_ERROR,
-                             "Unhandled SPDY frame type: %d", frame_type);
+                             "Unhandled SPDY frame type: %d", frame.type);
       return -1;
       break;
   }
@@ -1638,10 +1644,10 @@ int dissect_spdy_frame(tvbuff_t *tvb,
    * Process the name-value pairs one at a time, after possibly
    * decompressing the header block.
    */
-  if (frame_type == SPDY_SYN_STREAM ||
-      frame_type == SPDY_SYN_REPLY ||
-      frame_type == SPDY_HEADERS) {
-    int header_block_length = frame_length + 8 - (offset - orig_offset);
+  if (frame.type == SPDY_SYN_STREAM ||
+      frame.type == SPDY_SYN_REPLY ||
+      frame.type == SPDY_HEADERS) {
+    int header_block_length = frame.length + 8 - (offset - orig_offset);
     proto_item *header_block_item;
     proto_tree *header_block_tree;
 
@@ -1670,7 +1676,7 @@ int dissect_spdy_frame(tvbuff_t *tvb,
        * case, though. */
       header_info = spdy_find_saved_header_block(pinfo->fd,
                                                  stream_id,
-                                                 frame_type);
+                                                 frame.type);
 
       /* Generate decompressed data and store it, since none was found. */
       if (header_info == NULL) {
@@ -1683,14 +1689,14 @@ int dissect_spdy_frame(tvbuff_t *tvb,
           /* Even streams are server-initiated and should never get a
            * client-initiated header block. Use reply decompressor. */
           decomp = conv_data->rply_decompressor;
-        } else if (frame_type == SPDY_HEADERS) {
+        } else if (frame.type == SPDY_HEADERS) {
           /* Odd streams are client-initiated, but may have HEADERS from either
            * side. Currently, no known clients send HEADERS so we assume they are
            * all from the server. */
           decomp = conv_data->rply_decompressor;
-        } else if (frame_type == SPDY_SYN_STREAM) {
+        } else if (frame.type == SPDY_SYN_STREAM) {
           decomp = conv_data->rqst_decompressor;
-        } else if (frame_type == SPDY_SYN_REPLY) {
+        } else if (frame.type == SPDY_SYN_REPLY) {
           decomp = conv_data->rply_decompressor;
         } else {
           /* Unhandled case. This should never happen. */
@@ -1719,7 +1725,7 @@ int dissect_spdy_frame(tvbuff_t *tvb,
         /* Store decompressed data. */
         header_info = spdy_save_header_block(pinfo->fd,
                                              stream_id,
-                                             frame_type,
+                                             frame.type,
                                              uncomp_ptr,
                                              uncomp_length);
       }
@@ -1749,7 +1755,7 @@ int dissect_spdy_frame(tvbuff_t *tvb,
   }
 
   /* TODO(hkhalil): Remove this escape hatch, process headers as possible. */
-  if (num_headers > frame_length) {
+  if (num_headers > frame.length) {
     expert_add_info_format(pinfo, spdy_tree, PI_MALFORMED, PI_ERROR,
                            "Number of headers is greater than frame length!");
     proto_item_append_text(ti,
@@ -1757,7 +1763,7 @@ int dissect_spdy_frame(tvbuff_t *tvb,
                            "frame length]");
     col_append_fstr(pinfo->cinfo, COL_INFO, "%s[%u]", frame_type_name,
                     stream_id);
-    return frame_length+8;
+    return frame.length + 8;
   }
 
   /* Process headers. */
@@ -1860,7 +1866,7 @@ int dissect_spdy_frame(tvbuff_t *tvb,
   }
 
   /* Assume that we've consumed the whole frame. */
-  return 8 + frame_length;
+  return 8 + frame.length;
 }
 
 static guint get_spdy_message_len(packet_info *UNUSED(pinfo), tvbuff_t *tvb,
