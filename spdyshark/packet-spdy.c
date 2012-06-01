@@ -534,8 +534,6 @@ static spdy_conv_t * get_or_create_spdy_conversation_data(packet_info *pinfo) {
       if (retcode != Z_OK) {
         printf("frame #%d: inflateInit() failed: %d\n",
                pinfo->fd->num, retcode);
-      } else if (spdy_debug) {
-        printf("created decompressor\n");
       }
       conv_data->dictionary_id = adler32(0L, Z_NULL, 0);
       conv_data->dictionary_id = adler32(conv_data->dictionary_id,
@@ -547,12 +545,6 @@ static spdy_conv_t * get_or_create_spdy_conversation_data(packet_info *pinfo) {
     register_postseq_cleanup_routine(reset_decompressors);
   }
 
-  if (spdy_debug) {
-    printf("\n===========================================\n\n");
-    printf("Conversation for frame #%d is %p\n", pinfo->fd->num, conversation);
-    if (conversation)
-        printf("  conv_data=%p\n", conversation_get_proto_data(conversation, proto_spdy));
-  }
   return conv_data;
 }
 
@@ -780,10 +772,6 @@ static int dissect_spdy_data_frame(tvbuff_t *tvb, int offset,
   flags = tvb_get_guint8(tvb, offset+4);
   frame_length = tvb_get_ntoh24(tvb, offset+5);
 
-  if (spdy_debug) {
-    printf("Data frame [stream_id=%u flags=0x%x length=%d]\n",
-           stream_id, flags, frame_length);
-  }
   if (spdy_tree) {
     proto_item_append_text(spdy_tree, ", data frame");
   }
@@ -1093,9 +1081,6 @@ static int dissect_spdy_settings(tvbuff_t *tvb,
                            num_entries);
     return -1;
   }
-  if (spdy_debug) {
-    printf("Dissecting %d settings from SETTINGS frame.\n", num_entries);
-  }
   if (frame_tree) {
     proto_tree_add_item(frame_tree,
                         hf_spdy_num_settings,
@@ -1212,7 +1197,7 @@ static guint8* spdy_decompress_header_block(tvbuff_t *tvb,
     if (decomp->adler != dictionary_id) {
       printf("decompressor wants dictionary %#x, but we have %#x\n",
              (guint)decomp->adler, dictionary_id);
-    }/* else*/ {
+    } else {
       retcode = inflateSetDictionary(decomp,
                                      spdy_dictionary,
                                      sizeof(spdy_dictionary));
@@ -1222,17 +1207,17 @@ static guint8* spdy_decompress_header_block(tvbuff_t *tvb,
     }
   }
 
+  /* Handle errors. */
   if (retcode != Z_OK) {
     return NULL;
-  } else {
-    *uncomp_length = bufsize - decomp->avail_out;
+  }
+
+  /* Handle successful inflation. */
+  *uncomp_length = bufsize - decomp->avail_out;
+  if (decomp->avail_in != 0) {
     if (spdy_debug) {
-      printf("Inflation SUCCEEDED. uncompressed size=%d\n", *uncomp_length);
-    }
-    if (decomp->avail_in != 0) {
-      if (spdy_debug) {
-        printf("  but there were %d input bytes left over\n", decomp->avail_in);
-      }
+      printf("Inflation SUCCEEDED. Uncompressed size=%d but there were %d "
+             "input bytes left over\n", *uncomp_length, decomp->avail_in);
     }
   }
   return se_memdup(uncomp_block, *uncomp_length);
@@ -1375,7 +1360,6 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
   gchar               *content_encoding = NULL;
 
   if (spdy_debug) {
-    printf("\n===========================================\n\n");
     printf("Attempting dissection for frame #%d\n",
            pinfo->fd->num);
   }
@@ -1449,10 +1433,6 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
                                    spdy_tree,
                                    spdy_proto,
                                    conv_data);
-  }
-  if (spdy_debug) {
-      printf("Control frame [version=%d type=%d flags=0x%x length=%d]\n",
-              version, frame_type, flags, frame_length);
   }
 
   /* Add frame info. */
@@ -1587,9 +1567,6 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
                                frame_type_name,
                                flags & SPDY_FLAG_FIN ? " [FIN]" : "",
                                stream_id, frame_length);
-        if (spdy_debug) {
-          printf("  stream ID=%u priority=%d\n", stream_id, priority);
-        }
       }
       break;
 
@@ -1698,7 +1675,7 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
 
       /* Generate decompressed data and store it, since none was found. */
       if (per_frame_info == NULL) {
-        guint uncomp_length;
+        guint uncomp_length = 0;
         z_streamp decomp;
         guint8 *uncomp_ptr;
 
@@ -1845,9 +1822,7 @@ int dissect_spdy_frame(tvbuff_t *tvb, int offset, packet_info *pinfo,
                                             4,
                                             ENC_NA);
     }
-    if (spdy_debug) {
-      printf("    %s: %s\n", header_name, header_value);
-    }
+
     /*
      * TODO(ers) check that the header name contains only legal characters.
      */
