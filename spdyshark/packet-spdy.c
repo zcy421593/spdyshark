@@ -204,6 +204,7 @@ static int hf_spdy_streamid = -1;
 static int hf_spdy_associated_streamid = -1;
 static int hf_spdy_priority = -1;
 static int hf_spdy_num_headers = -1;
+static int hf_spdy_rst_stream_status = -1;
 static int hf_spdy_num_settings = -1;
 static int hf_spdy_setting = -1;
 static int hf_spdy_setting_id = -1;
@@ -1193,6 +1194,56 @@ static int dissect_spdy_settings_payload(
   return frame->length;
 }
 
+static int dissect_spdy_rst_stream_payload(
+    tvbuff_t *tvb,
+    int offset,
+    packet_info *pinfo,
+    proto_tree *frame_tree,
+    const spdy_control_frame_info_t *frame) {
+  guint32 stream_id;
+  guint32 rst_status;
+
+  /* Get stream ID and add to info column and tree. */
+  stream_id = tvb_get_bits32(tvb, (offset * 8) + 1, 31, ENC_NA);
+  col_append_fstr(pinfo->cinfo, COL_INFO, ", (Stream: %d)", stream_id);
+  if (frame_tree) {
+    proto_tree_add_item(frame_tree,
+                        hf_spdy_streamid,
+                        tvb,
+                        offset,
+                        4,
+                        ENC_BIG_ENDIAN);
+  }
+  offset += 4;
+
+  /* Get status. */
+  rst_status = tvb_get_ntohl(tvb, offset);
+  if (match_strval(rst_status, rst_stream_status_names) == NULL) {
+    /* Handle boundary conditions. */
+    expert_add_info_format(pinfo, frame_tree, PI_PROTOCOL, PI_ERROR,
+                           "Invalid status code for RST_STREAM: %u",
+                           rst_status);
+  }
+
+  /* Add status to info column. */
+  col_append_fstr(pinfo->cinfo,
+                  COL_INFO,
+                  ", (Status: %s)",
+                  val_to_str(rst_status,
+                             rst_stream_status_names,
+                             "Unknown (%d)"));
+
+  /* Add proto item for rst_status. */
+  proto_tree_add_item(frame_tree,
+                      hf_spdy_rst_stream_status,
+                      tvb,
+                      offset,
+                      4,
+                      ENC_BIG_ENDIAN);
+
+  return frame->length;
+}
+
 /*
  * Performs header decompression.
  *
@@ -1360,8 +1411,6 @@ int dissect_spdy_frame(tvbuff_t *tvb,
   guint32             associated_stream_id = 0;
   gint                priority = 0;
   guint32             num_headers = 0;
-  guint32             rst_status;
-  const gchar         *rst_status_str;
   guint32             ping_id;
   guint32             window_update_delta;
   const char          *proto_tag;
@@ -1575,23 +1624,10 @@ int dissect_spdy_frame(tvbuff_t *tvb,
       break;
 
     case SPDY_RST_STREAM:
-      /* Get stream ID and add to info column. */
-      stream_id = tvb_get_bits32(tvb, (offset << 3) + 1, 31, FALSE);
-      col_append_fstr(pinfo->cinfo, COL_INFO, "[%d]", stream_id);
-
-      rst_status = tvb_get_ntohl(tvb, offset);
-      if (match_strval(rst_status, rst_stream_status_names) == NULL) {
-        /* Handle boundary conditions. */
-        expert_add_info_format(pinfo, spdy_tree, PI_PROTOCOL, PI_ERROR,
-                               "Invalid status code for RST_STREAM: %u",
-                               rst_status);
+      if (0 > dissect_spdy_rst_stream_payload(tvb, offset, pinfo, spdy_tree,
+                                               &frame)) {
+        return -1;
       }
-      rst_status_str = val_to_str(rst_status,
-                                  rst_stream_status_names,
-                                  "Unknown (%d)");
-      col_append_fstr(pinfo->cinfo, COL_INFO, " %s", rst_status_str);
-      /* TODO(hkhalil): Add proto item for rst_status). */
-      offset += 8;
       break;
 
     case SPDY_SETTINGS:
@@ -2092,6 +2128,12 @@ void proto_register_spdy(void) {
     { &hf_spdy_num_headers,
       { "Number of headers", "spdy.numheaders",
           FT_UINT32, BASE_DEC, NULL, 0x0,
+          "", HFILL
+      }
+    },
+    { &hf_spdy_rst_stream_status,
+      { "Reset Status",   "spdy.rst_stream_status",
+          FT_UINT32, BASE_DEC, VALS(rst_stream_status_names), 0x0,
           "", HFILL
       }
     },
