@@ -1125,6 +1125,433 @@ body_dissected:
   return frame->length;
 }
 
+/*
+ * Performs header decompression.
+ *
+ * The returned buffer is automatically scoped to the lifetime of the capture
+ * (via se_memdup()).
+ */
+static guint8* spdy_decompress_header_block(tvbuff_t *tvb,
+                                            z_streamp decomp,
+                                            guint32 dictionary_id,
+                                            int offset,
+                                            guint32 length,
+                                            guint *uncomp_length) {
+  int retcode;
+  size_t bufsize = 16384;
+  const guint8 *hptr = tvb_get_ptr(tvb, offset, length);
+  guint8 *uncomp_block = ep_alloc(bufsize);
+  decomp->next_in = (Bytef *)hptr;
+  decomp->avail_in = length;
+  decomp->next_out = uncomp_block;
+  decomp->avail_out = bufsize;
+  retcode = inflate(decomp, Z_SYNC_FLUSH);
+  if (retcode == Z_NEED_DICT) {
+    if (decomp->adler != dictionary_id) {
+      printf("decompressor wants dictionary %#x, but we have %#x\n",
+             (guint)decomp->adler, dictionary_id);
+    } else {
+      retcode = inflateSetDictionary(decomp,
+                                     spdy_dictionary,
+                                     sizeof(spdy_dictionary));
+      if (retcode == Z_OK) {
+        retcode = inflate(decomp, Z_SYNC_FLUSH);
+      }
+    }
+  }
+
+  /* Handle errors. */
+  if (retcode != Z_OK) {
+    return NULL;
+  }
+
+  /* Handle successful inflation. */
+  *uncomp_length = bufsize - decomp->avail_out;
+  if (decomp->avail_in != 0) {
+    if (spdy_debug) {
+      printf("Inflation SUCCEEDED. Uncompressed size=%d but there were %d "
+             "input bytes left over\n", *uncomp_length, decomp->avail_in);
+    }
+  }
+  return se_memdup(uncomp_block, *uncomp_length);
+}
+
+/* TODO(cbentzel): Change wireshark to export p_remove_proto_data, rather
+ * than duplicating code here. */
+typedef struct _spdy_frame_proto_data {
+  int proto;
+  void *proto_data;
+} spdy_frame_proto_data;
+
+static gint spdy_p_compare(gconstpointer a, gconstpointer b) {
+  const spdy_frame_proto_data *ap = (const spdy_frame_proto_data *)a;
+  const spdy_frame_proto_data *bp = (const spdy_frame_proto_data *)b;
+
+  if (ap -> proto > bp -> proto) {
+    return 1;
+  } else if (ap -> proto == bp -> proto) {
+    return 0;
+  } else {
+    return -1;
+  }
+}
+
+static void spdy_p_remove_proto_data(frame_data *fd, int proto) {
+  spdy_frame_proto_data temp;
+  GSList *item;
+
+  temp.proto = proto;
+  temp.proto_data = NULL;
+
+  item = g_slist_find_custom(fd->pfd, (gpointer *)&temp, spdy_p_compare);
+
+  if (item) {
+    fd->pfd = g_slist_remove(fd->pfd, item->data);
+  }
+}
+
+/*
+ * Saves state on header data for a given stream.
+ */
+static spdy_header_info_t* spdy_save_header_block(frame_data *fd,
+                                                  guint32 stream_id,
+                                                  guint16 frame_type,
+                                                  guint8 *header,
+                                                  guint length) {
+  GSList *filist = p_get_proto_data(fd, proto_spdy);
+  spdy_header_info_t *header_info = se_alloc(sizeof(spdy_header_info_t));
+  if (filist != NULL)
+    spdy_p_remove_proto_data(fd, proto_spdy);
+  header_info->stream_id = stream_id;
+  header_info->header_block = header;
+  header_info->header_block_len = length;
+  header_info->frame_type = frame_type;
+  filist = g_slist_append(filist, header_info);
+  p_add_proto_data(fd, proto_spdy, filist);
+  return header_info;
+  /* TODO(ers) these need to get deleted when no longer needed */
+}
+
+/*
+ * Retrieves saved state for a given stream.
+ */
+static spdy_header_info_t* spdy_find_saved_header_block(frame_data *fd,
+                                                        guint32 stream_id,
+                                                        guint16 frame_type) {
+  GSList *filist = p_get_proto_data(fd, proto_spdy);
+  while (filist != NULL) {
+      spdy_header_info_t *hi = filist->data;
+      if (hi->stream_id == stream_id && hi->frame_type == frame_type)
+          return hi;
+      filist = g_slist_next(filist);
+  }
+  return NULL;
+}
+
+/*
+ * Given a content type string that may contain optional parameters,
+ * return the parameter string, if any, otherwise return NULL. This
+ * also has the side effect of null terminating the content type
+ * part of the original string.
+ */
+static gchar* spdy_parse_content_type(gchar *content_type) {
+  gchar *cp = content_type;
+
+  while (*cp != '\0' && *cp != ';' && !isspace(*cp)) {
+    *cp = tolower(*cp);
+    ++cp;
+  }
+  if (*cp == '\0') {
+    cp = NULL;
+  }
+
+  if (cp != NULL) {
+    *cp++ = '\0';
+    while (*cp == ';' || isspace(*cp)) {
+      ++cp;
+    }
+    if (*cp != '\0') {
+      return cp;
+    }
+  }
+  return NULL;
+}
+
+static int dissect_spdy_header_payload(
+    tvbuff_t *tvb,
+    int offset,
+    packet_info *pinfo,
+    proto_tree *frame_tree,
+    const spdy_control_frame_info_t *frame,
+    spdy_conv_t *conv_data) {
+  guint32 stream_id;
+  int header_block_length = frame->length;
+  int hdr_offset = 0;
+  tvbuff_t *header_tvb = NULL;
+  gchar *hdr_verb = NULL;
+  gchar *hdr_url = NULL;
+  gchar *hdr_version = NULL;
+  gchar *content_type = NULL;
+  gchar *content_encoding = NULL;
+  guint32 num_headers = 0;
+  proto_item *header_block_item = NULL;
+  proto_tree *header_block_tree = NULL;
+  proto_item *ti = NULL;
+
+  /* Get stream id, which is present in all types of header frames. */
+  stream_id = get_spdy_stream_id(tvb, offset);
+  dissect_spdy_stream_id(tvb, offset, pinfo, frame_tree);
+  offset += 4;
+
+  /* Get SYN_STREAM-only fields. */
+  if (frame->type == SPDY_SYN_STREAM) {
+    /* Get associated stream ID. */
+    dissect_spdy_stream_id_field(tvb, offset, pinfo, frame_tree,
+                                 hf_spdy_associated_streamid);
+    offset += 4;
+
+    /* Get priority */
+    if (frame_tree) {
+      proto_tree_add_bits_item(frame_tree,
+                               hf_spdy_priority,
+                               tvb,
+                               (offset) * 8,
+                               3,
+                               ENC_BIG_ENDIAN);
+    }
+    offset += 2;
+  }
+
+
+  /* Get our header block length. */
+  switch (frame->type) {
+    case SPDY_SYN_STREAM:
+      header_block_length -= 10;
+      break;
+    case SPDY_SYN_REPLY:
+    case SPDY_HEADERS:
+      header_block_length -= 4;
+      break;
+    default:
+      /* Unhandled case. This should never happen. */
+      assert(FALSE);
+  }
+
+  if (frame_tree) {
+    /* Add the header block. */
+    header_block_item = proto_tree_add_item(frame_tree,
+                                            hf_spdy_header_block,
+                                            tvb,
+                                            offset,
+                                            header_block_length,
+                                            ENC_NA);
+    header_block_tree = proto_item_add_subtree(header_block_item,
+                                               ett_spdy_header_block);
+  }
+
+  /* Decompress header block as necessary. */
+  if (!spdy_decompress_headers) {
+      header_tvb = tvb;
+      hdr_offset = offset;
+  } else {
+    spdy_header_info_t *header_info;
+
+    /* First attempt to find previously decompressed data.
+     * This will not work correctly for lower-level frames that contain more
+     * than one SPDY frame of the same type. We assume this to never be the
+     * case, though. */
+    header_info = spdy_find_saved_header_block(pinfo->fd,
+                                               stream_id,
+                                               frame->type);
+
+    /* Generate decompressed data and store it, since none was found. */
+    if (header_info == NULL) {
+      guint uncomp_length = 0;
+      z_streamp decomp;
+      guint8 *uncomp_ptr;
+
+      /* Get our decompressor. */
+      if (stream_id % 2 == 0) {
+        /* Even streams are server-initiated and should never get a
+         * client-initiated header block. Use reply decompressor. */
+        decomp = conv_data->rply_decompressor;
+      } else if (frame->type == SPDY_HEADERS) {
+        /* Odd streams are client-initiated, but may have HEADERS from either
+         * side. Currently, no known clients send HEADERS so we assume they are
+         * all from the server. */
+        decomp = conv_data->rply_decompressor;
+      } else if (frame->type == SPDY_SYN_STREAM) {
+        decomp = conv_data->rqst_decompressor;
+      } else if (frame->type == SPDY_SYN_REPLY) {
+        decomp = conv_data->rply_decompressor;
+      } else {
+        /* Unhandled case. This should never happen. */
+        assert(FALSE);
+      }
+
+      /* Decompress. */
+      uncomp_ptr = spdy_decompress_header_block(tvb,
+                                                decomp,
+                                                conv_data->dictionary_id,
+                                                offset,
+                                                header_block_length,
+                                                &uncomp_length);
+
+      /* Catch decompression failures. */
+      if (uncomp_ptr == NULL) {
+        expert_add_info_format(pinfo, frame_tree, PI_UNDECODED, PI_ERROR,
+                               "Inflation failed. Aborting.");
+        if (frame_tree) {
+          proto_item_append_text(frame_tree,
+                                 " [Error: Header decompression failed]");
+        }
+        return -1;
+      }
+
+      /* Store decompressed data. */
+      header_info = spdy_save_header_block(pinfo->fd,
+                                           stream_id,
+                                           frame->type,
+                                           uncomp_ptr,
+                                           uncomp_length);
+    }
+
+    /* Create a tvb containing the uncompressed data. */
+    header_tvb = tvb_new_child_real_data(tvb,
+                                         header_info->header_block,
+                                         header_info->header_block_len,
+                                         header_info->header_block_len);
+    add_new_data_source(pinfo, header_tvb, "Uncompressed headers");
+    hdr_offset = 0;
+  }
+
+  /* Get header block details. */
+  if (header_tvb == NULL || !spdy_decompress_headers) {
+    num_headers = 0;
+  } else {
+    num_headers = tvb_get_ntohl(header_tvb, hdr_offset);
+    ti = proto_tree_add_item(frame_tree,
+                             hf_spdy_num_headers,
+                             header_tvb,
+                             hdr_offset,
+                             4,
+                             ENC_BIG_ENDIAN);
+  }
+  hdr_offset += 4;
+
+  /* TODO(hkhalil): Remove this escape hatch, process headers as possible. */
+  if (num_headers > frame->length) {
+    expert_add_info_format(pinfo, frame_tree, PI_MALFORMED, PI_ERROR,
+                           "Number of headers is greater than frame length!");
+    proto_item_append_text(ti,
+                           " [Error: Number of headers is larger than "
+                           "frame length]");
+    return frame->length;
+  }
+
+  /* Process headers. */
+  hdr_verb = hdr_url = hdr_version = content_type = content_encoding = NULL;
+  while (num_headers-- &&
+         tvb_length_remaining(header_tvb, hdr_offset) != 0) {
+    gchar *header_name;
+    gchar *header_value;
+    proto_tree *header_tree;
+    proto_item *header;
+    proto_item *header_name_ti;
+    proto_item *header_value_ti;
+    int header_name_offset;
+    int header_value_offset;
+    guint32 header_name_length;
+    guint32 header_value_length;
+
+    /* Get header name details. */
+    header_name_offset = hdr_offset;
+    header_name_length = tvb_get_ntohl(header_tvb, hdr_offset);
+    hdr_offset += 4;
+    header_name = (gchar *)tvb_get_ephemeral_string(header_tvb,
+                                                    hdr_offset,
+                                                    header_name_length);
+    hdr_offset += header_name_length;
+
+    /* Get header value details. */
+    header_value_offset = hdr_offset;
+    header_value_length = tvb_get_ntohl(header_tvb, hdr_offset);
+    hdr_offset += 4;
+    header_value = (gchar *)tvb_get_ephemeral_string(header_tvb,
+                                                     hdr_offset,
+                                                     header_value_length);
+    hdr_offset += header_value_length;
+
+    /* Populate tree with header name/value details. */
+    if (frame_tree) {
+      /* Add 'Header' subtree with description. */
+      header = proto_tree_add_item(frame_tree,
+                                   hf_spdy_header,
+                                   header_tvb,
+                                   header_name_offset,
+                                   hdr_offset - header_name_offset,
+                                   ENC_NA);
+      proto_item_append_text(header, ": %s: %s", header_name, header_value);
+      header_tree = proto_item_add_subtree(header, ett_spdy_header);
+
+      /* Add header name. */
+      header_name_ti = proto_tree_add_item(header_tree,
+                                           hf_spdy_header_name,
+                                           header_tvb,
+                                           header_name_offset,
+                                           4,
+                                           ENC_NA);
+
+      /* Add 'Value' subtree with descriptive text. */
+      header_value_ti = proto_tree_add_item(header_tree,
+                                            hf_spdy_header_value,
+                                            header_tvb,
+                                            header_value_offset,
+                                            4,
+                                            ENC_NA);
+    }
+
+    /*
+     * TODO(ers) check that the header name contains only legal characters.
+     */
+    if (g_ascii_strcasecmp(header_name, "method") == 0 ||
+      g_ascii_strcasecmp(header_name, "status") == 0) {
+      hdr_verb = header_value;
+    } else if (g_ascii_strcasecmp(header_name, "url") == 0) {
+      hdr_url = header_value;
+    } else if (g_ascii_strcasecmp(header_name, "version") == 0) {
+      hdr_version = header_value;
+    } else if (g_ascii_strcasecmp(header_name, "content-type") == 0) {
+      content_type = se_strdup(header_value);
+    } else if (g_ascii_strcasecmp(header_name, "content-encoding") == 0) {
+      content_encoding = se_strdup(header_value);
+    }
+  }
+
+  /* Set Info column. */
+  if (hdr_version != NULL) {
+    if (hdr_url != NULL) {
+      col_append_fstr(pinfo->cinfo, COL_INFO, ": %s %s %s",
+                      hdr_verb, hdr_url, hdr_version);
+    } else {
+      col_append_fstr(pinfo->cinfo, COL_INFO, ": %s %s",
+                   hdr_verb, hdr_version);
+    }
+  }
+
+  /*
+   * If we expect data on this stream, we need to remember the content
+   * type and content encoding.
+   */
+  if (content_type != NULL && !pinfo->fd->flags.visited) {
+    gchar *content_type_params = spdy_parse_content_type(content_type);
+    spdy_save_stream_info(conv_data, stream_id, content_type,
+                          content_type_params, content_encoding);
+  }
+
+  return frame->length;
+}
+
 static int dissect_spdy_rst_stream_payload(
     tvbuff_t *tvb,
     int offset,
@@ -1323,159 +1750,6 @@ static int dissect_spdy_goaway_payload(tvbuff_t *tvb,
   return frame->length;
 }
 
-
-/*
- * Performs header decompression.
- *
- * The returned buffer is automatically scoped to the lifetime of the capture
- * (via se_memdup()).
- */
-static guint8* spdy_decompress_header_block(tvbuff_t *tvb,
-                                            z_streamp decomp,
-                                            guint32 dictionary_id,
-                                            int offset,
-                                            guint32 length,
-                                            guint *uncomp_length) {
-  int retcode;
-  size_t bufsize = 16384;
-  const guint8 *hptr = tvb_get_ptr(tvb, offset, length);
-  guint8 *uncomp_block = ep_alloc(bufsize);
-  decomp->next_in = (Bytef *)hptr;
-  decomp->avail_in = length;
-  decomp->next_out = uncomp_block;
-  decomp->avail_out = bufsize;
-  retcode = inflate(decomp, Z_SYNC_FLUSH);
-  if (retcode == Z_NEED_DICT) {
-    if (decomp->adler != dictionary_id) {
-      printf("decompressor wants dictionary %#x, but we have %#x\n",
-             (guint)decomp->adler, dictionary_id);
-    } else {
-      retcode = inflateSetDictionary(decomp,
-                                     spdy_dictionary,
-                                     sizeof(spdy_dictionary));
-      if (retcode == Z_OK) {
-        retcode = inflate(decomp, Z_SYNC_FLUSH);
-      }
-    }
-  }
-
-  /* Handle errors. */
-  if (retcode != Z_OK) {
-    return NULL;
-  }
-
-  /* Handle successful inflation. */
-  *uncomp_length = bufsize - decomp->avail_out;
-  if (decomp->avail_in != 0) {
-    if (spdy_debug) {
-      printf("Inflation SUCCEEDED. Uncompressed size=%d but there were %d "
-             "input bytes left over\n", *uncomp_length, decomp->avail_in);
-    }
-  }
-  return se_memdup(uncomp_block, *uncomp_length);
-}
-
-/* TODO(cbentzel): Change wireshark to export p_remove_proto_data, rather
- * than duplicating code here. */
-typedef struct _spdy_frame_proto_data {
-  int proto;
-  void *proto_data;
-} spdy_frame_proto_data;
-
-static gint spdy_p_compare(gconstpointer a, gconstpointer b) {
-  const spdy_frame_proto_data *ap = (const spdy_frame_proto_data *)a;
-  const spdy_frame_proto_data *bp = (const spdy_frame_proto_data *)b;
-
-  if (ap -> proto > bp -> proto) {
-    return 1;
-  } else if (ap -> proto == bp -> proto) {
-    return 0;
-  } else {
-    return -1;
-  }
-}
-
-static void spdy_p_remove_proto_data(frame_data *fd, int proto) {
-  spdy_frame_proto_data temp;
-  GSList *item;
-
-  temp.proto = proto;
-  temp.proto_data = NULL;
-
-  item = g_slist_find_custom(fd->pfd, (gpointer *)&temp, spdy_p_compare);
-
-  if (item) {
-    fd->pfd = g_slist_remove(fd->pfd, item->data);
-  }
-}
-
-/*
- * Saves state on header data for a given stream.
- */
-static spdy_header_info_t* spdy_save_header_block(frame_data *fd,
-                                                  guint32 stream_id,
-                                                  guint16 frame_type,
-                                                  guint8 *header,
-                                                  guint length) {
-  GSList *filist = p_get_proto_data(fd, proto_spdy);
-  spdy_header_info_t *header_info = se_alloc(sizeof(spdy_header_info_t));
-  if (filist != NULL)
-    spdy_p_remove_proto_data(fd, proto_spdy);
-  header_info->stream_id = stream_id;
-  header_info->header_block = header;
-  header_info->header_block_len = length;
-  header_info->frame_type = frame_type;
-  filist = g_slist_append(filist, header_info);
-  p_add_proto_data(fd, proto_spdy, filist);
-  return header_info;
-  /* TODO(ers) these need to get deleted when no longer needed */
-}
-
-/*
- * Retrieves saved state for a given stream.
- */
-static spdy_header_info_t* spdy_find_saved_header_block(frame_data *fd,
-                                                        guint32 stream_id,
-                                                        guint16 frame_type) {
-  GSList *filist = p_get_proto_data(fd, proto_spdy);
-  while (filist != NULL) {
-      spdy_header_info_t *hi = filist->data;
-      if (hi->stream_id == stream_id && hi->frame_type == frame_type)
-          return hi;
-      filist = g_slist_next(filist);
-  }
-  return NULL;
-}
-
-/*
- * Given a content type string that may contain optional parameters,
- * return the parameter string, if any, otherwise return NULL. This
- * also has the side effect of null terminating the content type
- * part of the original string.
- */
-static gchar* spdy_parse_content_type(gchar *content_type) {
-  gchar *cp = content_type;
-
-  while (*cp != '\0' && *cp != ';' && !isspace(*cp)) {
-    *cp = tolower(*cp);
-    ++cp;
-  }
-  if (*cp == '\0') {
-    cp = NULL;
-  }
-
-  if (cp != NULL) {
-    *cp++ = '\0';
-    while (*cp == ';' || isspace(*cp)) {
-      ++cp;
-    }
-    if (*cp != '\0') {
-      return cp;
-    }
-  }
-  return NULL;
-}
-
 /*
  * Performs SPDY frame dissection.
  * TODO(hkhalil): Refactor!
@@ -1488,23 +1762,12 @@ int dissect_spdy_frame(tvbuff_t *tvb,
   guint8              control_bit;
   spdy_control_frame_info_t frame;
   guint32             stream_id = 0;
-  gint                priority = 0;
-  guint32             num_headers = 0;
   guint32             ping_id;
   guint32             window_update_delta;
   const char          *proto_tag;
   const char          *frame_type_name;
   proto_tree          *spdy_tree = NULL;
-  proto_item          *ti = NULL;
   proto_item          *spdy_proto = NULL;
-  int                 orig_offset;
-  int                 hdr_offset = 0;
-  tvbuff_t            *header_tvb = NULL;
-  gchar               *hdr_verb = NULL;
-  gchar               *hdr_url = NULL;
-  gchar               *hdr_version = NULL;
-  gchar               *content_type = NULL;
-  gchar               *content_encoding = NULL;
 
   if (spdy_debug) {
     printf("Attempting dissection for frame #%d\n",
@@ -1535,8 +1798,6 @@ int dissect_spdy_frame(tvbuff_t *tvb,
                                      ENC_NA);
     spdy_tree = proto_item_add_subtree(spdy_proto, ett_spdy);
   }
-
-  orig_offset = offset;
 
   /* Add control bit. */
   control_bit = tvb_get_bits8(tvb, offset << 3, 1);
@@ -1657,35 +1918,16 @@ int dissect_spdy_frame(tvbuff_t *tvb,
     case SPDY_SYN_STREAM:
     case SPDY_SYN_REPLY:
     case SPDY_HEADERS:
-      stream_id = get_spdy_stream_id(tvb, offset);
-      dissect_spdy_stream_id(tvb, offset, pinfo, spdy_tree);
-      offset += 4;
-
-      /* Get SYN_STREAM-only fields. */
-      if (frame.type == SPDY_SYN_STREAM) {
-        /* Get associated stream ID. */
-        dissect_spdy_stream_id_field(tvb, offset, pinfo, spdy_tree,
-                                     hf_spdy_associated_streamid);
-        offset += 4;
-
-        /* Get priority */
-        priority = tvb_get_bits8(tvb, offset << 3, 3);
-        if (spdy_tree) {
-          proto_tree_add_bits_item(spdy_tree,
-                                   hf_spdy_priority,
-                                   tvb,
-                                   (offset) * 8,
-                                   3,
-                                   ENC_BIG_ENDIAN);
-        }
-        offset += 2;
+      if (0 > dissect_spdy_header_payload(tvb, offset, pinfo, spdy_tree,
+                                          &frame, conv_data)) {
+        return -1;
       }
 
       break;
 
     case SPDY_RST_STREAM:
       if (0 > dissect_spdy_rst_stream_payload(tvb, offset, pinfo, spdy_tree,
-                                               &frame)) {
+                                              &frame)) {
         return -1;
       }
       break;
@@ -1736,231 +1978,6 @@ int dissect_spdy_frame(tvbuff_t *tvb,
                              "Unhandled SPDY frame type: %d", frame.type);
       return -1;
       break;
-  }
-
-  /*
-   * Process the name-value pairs one at a time, after possibly
-   * decompressing the header block.
-   */
-  if (frame.type == SPDY_SYN_STREAM ||
-      frame.type == SPDY_SYN_REPLY ||
-      frame.type == SPDY_HEADERS) {
-    int header_block_length = frame.length + 8 - (offset - orig_offset);
-    proto_item *header_block_item;
-    proto_tree *header_block_tree;
-
-    if (spdy_tree) {
-      /* Add the header block. */
-      header_block_item = proto_tree_add_item(spdy_tree,
-                                              hf_spdy_header_block,
-                                              tvb,
-                                              offset,
-                                              header_block_length,
-                                              ENC_NA);
-      header_block_tree = proto_item_add_subtree(header_block_item,
-                                                 ett_spdy_header_block);
-    }
-
-    /* Decompress header block as necessary. */
-    if (!spdy_decompress_headers) {
-        header_tvb = tvb;
-        hdr_offset = offset;
-    } else {
-      spdy_header_info_t *header_info;
-
-      /* First attempt to find previously decompressed data.
-       * This will not work correctly for lower-level frames that contain more
-       * than one SPDY frame of the same type. We assume this to never be the
-       * case, though. */
-      header_info = spdy_find_saved_header_block(pinfo->fd,
-                                                 stream_id,
-                                                 frame.type);
-
-      /* Generate decompressed data and store it, since none was found. */
-      if (header_info == NULL) {
-        guint uncomp_length = 0;
-        z_streamp decomp;
-        guint8 *uncomp_ptr;
-
-        /* Get our decompressor. */
-        if (stream_id % 2 == 0) {
-          /* Even streams are server-initiated and should never get a
-           * client-initiated header block. Use reply decompressor. */
-          decomp = conv_data->rply_decompressor;
-        } else if (frame.type == SPDY_HEADERS) {
-          /* Odd streams are client-initiated, but may have HEADERS from either
-           * side. Currently, no known clients send HEADERS so we assume they are
-           * all from the server. */
-          decomp = conv_data->rply_decompressor;
-        } else if (frame.type == SPDY_SYN_STREAM) {
-          decomp = conv_data->rqst_decompressor;
-        } else if (frame.type == SPDY_SYN_REPLY) {
-          decomp = conv_data->rply_decompressor;
-        } else {
-          /* Unhandled case. This should never happen. */
-          assert(FALSE);
-        }
-
-        /* Decompress. */
-        uncomp_ptr = spdy_decompress_header_block(tvb,
-                                                  decomp,
-                                                  conv_data->dictionary_id,
-                                                  offset,
-                                                  header_block_length,
-                                                  &uncomp_length);
-
-        /* Catch decompression failures. */
-        if (uncomp_ptr == NULL) {
-          expert_add_info_format(pinfo, spdy_tree, PI_UNDECODED, PI_ERROR,
-                                 "Inflation failed. Aborting.");
-          if (spdy_proto) {
-            proto_item_append_text(spdy_proto,
-                                   " [Error: Header decompression failed]");
-          }
-          return -1;
-        }
-
-        /* Store decompressed data. */
-        header_info = spdy_save_header_block(pinfo->fd,
-                                             stream_id,
-                                             frame.type,
-                                             uncomp_ptr,
-                                             uncomp_length);
-      }
-
-      /* Create a tvb containing the uncompressed data. */
-      header_tvb = tvb_new_child_real_data(tvb,
-                                           header_info->header_block,
-                                           header_info->header_block_len,
-                                           header_info->header_block_len);
-      add_new_data_source(pinfo, header_tvb, "Uncompressed headers");
-      hdr_offset = 0;
-    }
-
-    /* Get header block details. */
-    if (header_tvb == NULL || !spdy_decompress_headers) {
-      num_headers = 0;
-    } else {
-      num_headers = tvb_get_ntohl(header_tvb, hdr_offset);
-      ti = proto_tree_add_item(spdy_tree,
-                               hf_spdy_num_headers,
-                               header_tvb,
-                               hdr_offset,
-                               4,
-                               ENC_BIG_ENDIAN);
-    }
-    hdr_offset += 4;
-  }
-
-  /* TODO(hkhalil): Remove this escape hatch, process headers as possible. */
-  if (num_headers > frame.length) {
-    expert_add_info_format(pinfo, spdy_tree, PI_MALFORMED, PI_ERROR,
-                           "Number of headers is greater than frame length!");
-    proto_item_append_text(ti,
-                           " [Error: Number of headers is larger than "
-                           "frame length]");
-    col_append_fstr(pinfo->cinfo, COL_INFO, "%s[%u]", frame_type_name,
-                    stream_id);
-    return frame.length + 8;
-  }
-
-  /* Process headers. */
-  hdr_verb = hdr_url = hdr_version = content_type = content_encoding = NULL;
-  while (num_headers-- &&
-         tvb_length_remaining(header_tvb, hdr_offset) != 0) {
-    gchar *header_name;
-    gchar *header_value;
-    proto_tree *header_tree;
-    proto_item *header;
-    proto_item *header_name_ti;
-    proto_item *header_value_ti;
-    int header_name_offset;
-    int header_value_offset;
-    guint32 header_name_length;
-    guint32 header_value_length;
-
-    /* Get header name details. */
-    header_name_offset = hdr_offset;
-    header_name_length = tvb_get_ntohl(header_tvb, hdr_offset);
-    hdr_offset += 4;
-    header_name = (gchar *)tvb_get_ephemeral_string(header_tvb,
-                                                    hdr_offset,
-                                                    header_name_length);
-    hdr_offset += header_name_length;
-
-    /* Get header value details. */
-    header_value_offset = hdr_offset;
-    header_value_length = tvb_get_ntohl(header_tvb, hdr_offset);
-    hdr_offset += 4;
-    header_value = (gchar *)tvb_get_ephemeral_string(header_tvb,
-                                                     hdr_offset,
-                                                     header_value_length);
-    hdr_offset += header_value_length;
-
-    /* Populate tree with header name/value details. */
-    if (tree) {
-      /* Add 'Header' subtree with description. */
-      header = proto_tree_add_item(spdy_tree,
-                                   hf_spdy_header,
-                                   header_tvb,
-                                   header_name_offset,
-                                   hdr_offset - header_name_offset,
-                                   ENC_NA);
-      proto_item_append_text(header, ": %s: %s", header_name, header_value);
-      header_tree = proto_item_add_subtree(header, ett_spdy_header);
-
-      /* Add header name. */
-      header_name_ti = proto_tree_add_item(header_tree,
-                                           hf_spdy_header_name,
-                                           header_tvb,
-                                           header_name_offset,
-                                           4,
-                                           ENC_NA);
-
-      /* Add 'Value' subtree with descriptive text. */
-      header_value_ti = proto_tree_add_item(header_tree,
-                                            hf_spdy_header_value,
-                                            header_tvb,
-                                            header_value_offset,
-                                            4,
-                                            ENC_NA);
-    }
-
-    /*
-     * TODO(ers) check that the header name contains only legal characters.
-     */
-    if (g_ascii_strcasecmp(header_name, "method") == 0 ||
-      g_ascii_strcasecmp(header_name, "status") == 0) {
-      hdr_verb = header_value;
-    } else if (g_ascii_strcasecmp(header_name, "url") == 0) {
-      hdr_url = header_value;
-    } else if (g_ascii_strcasecmp(header_name, "version") == 0) {
-      hdr_version = header_value;
-    } else if (g_ascii_strcasecmp(header_name, "content-type") == 0) {
-      content_type = se_strdup(header_value);
-    } else if (g_ascii_strcasecmp(header_name, "content-encoding") == 0) {
-      content_encoding = se_strdup(header_value);
-    }
-  }
-
-  /* Set Info column. */
-  if (hdr_version != NULL) {
-    if (hdr_url != NULL) {
-      col_append_fstr(pinfo->cinfo, COL_INFO, ": %s %s %s",
-                      hdr_verb, hdr_url, hdr_version);
-    } else {
-      col_append_fstr(pinfo->cinfo, COL_INFO, ": %s %s",
-                   hdr_verb, hdr_version);
-    }
-  }
-  /*
-   * If we expect data on this stream, we need to remember the content
-   * type and content encoding.
-   */
-  if (content_type != NULL && !pinfo->fd->flags.visited) {
-    gchar *content_type_params = spdy_parse_content_type(content_type);
-    spdy_save_stream_info(conv_data, stream_id, content_type,
-                          content_type_params, content_encoding);
   }
 
   /* Assume that we've consumed the whole frame. */
