@@ -57,6 +57,19 @@
 
 #define MIN_SPDY_VERSION 3
 
+/* The types of SPDY frames */
+#define SPDY_DATA           0
+#define SPDY_SYN_STREAM     1
+#define SPDY_SYN_REPLY      2
+#define SPDY_RST_STREAM     3
+#define SPDY_SETTINGS       4
+#define SPDY_PING           6
+#define SPDY_GOAWAY         7
+#define SPDY_HEADERS        8
+#define SPDY_WINDOW_UPDATE  9
+#define SPDY_CREDENTIAL    10
+#define SPDY_INVALID       11
+
 #define SPDY_FLAG_FIN  0x01
 #define SPDY_FLAG_UNIDIRECTIONAL 0x02
 #define SPDY_FLAG_SETTINGS_CLEAR_SETTINGS 0x01
@@ -77,35 +90,19 @@
 # define UNUSED(x) x
 #endif
 
-/* The types of SPDY control frames */
-typedef enum _spdy_type {
-    SPDY_DATA,
-    SPDY_SYN_STREAM,
-    SPDY_SYN_REPLY,
-    SPDY_RST_STREAM,
-    SPDY_SETTINGS,
-    SPDY_NOOP,
-    SPDY_PING,
-    SPDY_GOAWAY,
-    SPDY_HEADERS,
-    SPDY_WINDOW_UPDATE,
-    SPDY_CREDENTIAL,
-    SPDY_INVALID
-} spdy_frame_type_t;
 
-static const char *frame_type_names[] = {
-    "DATA",
-    "SYN_STREAM",
-    "SYN_REPLY",
-    "RST_STREAM",
-    "SETTINGS",
-    "NOOP",
-    "PING",
-    "GOAWAY",
-    "HEADERS",
-    "WINDOW_UPDATE",
-    "CREDENTIAL",
-    "INVALID"
+static const value_string frame_type_names[] = {
+    { SPDY_DATA,          "DATA" },
+    { SPDY_SYN_STREAM,    "SYN_STREAM" },
+    { SPDY_SYN_REPLY,     "SYN_REPLY" },
+    { SPDY_RST_STREAM,    "RST_STREAM" },
+    { SPDY_SETTINGS,      "SETTINGS" },
+    { SPDY_PING,          "PING" },
+    { SPDY_GOAWAY,        "GOAWAY" },
+    { SPDY_HEADERS,       "HEADERS" },
+    { SPDY_WINDOW_UPDATE, "WINDOW_UPDATE" },
+    { SPDY_CREDENTIAL,    "CREDENTIAL" },
+    { SPDY_INVALID,       "INVALID" },
 };
 
 static const value_string rst_stream_status_names[] = {
@@ -1832,7 +1829,7 @@ int dissect_spdy_frame(tvbuff_t *tvb,
   guint8              control_bit;
   spdy_control_frame_info_t frame;
   guint32             stream_id = 0;
-  const char          *frame_type_name;
+  const gchar         *frame_type_name;
   proto_tree          *spdy_tree = NULL;
   proto_item          *spdy_proto = NULL;
 
@@ -1920,7 +1917,7 @@ int dissect_spdy_frame(tvbuff_t *tvb,
   }
 
   /* Add frame info. */
-  frame_type_name = frame_type_names[frame.type];
+  frame_type_name = val_to_str(frame.type, frame_type_names, "Unknown(%d)");
   col_add_str(pinfo->cinfo, COL_INFO, frame_type_name);
   if (spdy_tree) {
     proto_item_append_text(spdy_tree, ", %s", frame_type_name);
@@ -2005,9 +2002,6 @@ int dissect_spdy_frame(tvbuff_t *tvb,
       }
       break;
 
-    case SPDY_NOOP:
-      break;
-
     case SPDY_PING:
       if (0 > dissect_spdy_ping_payload(tvb, offset, pinfo, spdy_tree,
                                         &frame)) {
@@ -2081,7 +2075,7 @@ static int dissect_spdy(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree) {
     dissected_len = dissect_spdy_frame(tvb, offset, pinfo, tree, conv_data);
     if (dissected_len != expected_frame_len) {
       if (spdy_debug) {
-        printf("Error decoding SPDY frame!");
+        printf("Error decoding SPDY frame!\n");
       }
       return offset;
     }
@@ -2170,8 +2164,8 @@ void proto_register_spdy(void) {
     },
     { &hf_spdy_type,
       { "Type",           "spdy.type",
-        FT_UINT16, BASE_DEC, /* TODO(hkhalil): Use VALS(frametypenames) */
-        NULL, 0x0,
+        FT_UINT16, BASE_DEC,
+        VALS(frame_type_names), 0x0,
         "", HFILL
       }
     },
