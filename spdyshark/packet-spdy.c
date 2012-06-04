@@ -1791,7 +1791,6 @@ int dissect_spdy_frame(tvbuff_t *tvb,
   spdy_control_frame_info_t frame;
   guint32             stream_id = 0;
   guint32             window_update_delta;
-  const char          *proto_tag;
   const char          *frame_type_name;
   proto_tree          *spdy_tree = NULL;
   proto_item          *spdy_proto = NULL;
@@ -1811,8 +1810,7 @@ int dissect_spdy_frame(tvbuff_t *tvb,
     return -1;
   }
 
-  proto_tag = "SPDY";
-  col_set_str(pinfo->cinfo, COL_PROTOCOL, proto_tag);
+  col_set_str(pinfo->cinfo, COL_PROTOCOL, "SPDY");
 
   /* Create SPDY tree elements. */
   if (tree) {
