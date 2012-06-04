@@ -133,6 +133,12 @@ static const value_string setting_id_names[] = {
   { 7, "INITIAL_WINDOW_SIZE" },
 };
 
+static const value_string goaway_status_names[] = {
+  { 0,  "OK" },
+  { 1,  "PROTOCOL_ERROR" },
+  { 11, "INTERNAL_ERROR" },
+};
+
 /*
  * This structure will be tied to each SPDY frame and is used as an argument for
  * dissect_spdy_*_payload() functions.
@@ -209,6 +215,8 @@ static int hf_spdy_num_settings = -1;
 static int hf_spdy_setting = -1;
 static int hf_spdy_setting_id = -1;
 static int hf_spdy_setting_value = -1;
+static int hf_spdy_goaway_last_good_stream_id = -1;
+static int hf_spdy_goaway_status = -1;
 
 static gint ett_spdy = -1;
 static gint ett_spdy_flags = -1;
@@ -1168,7 +1176,6 @@ static int dissect_spdy_settings_payload(
   proto_tree *setting_tree;
   proto_tree *flags_tree;
 
-
   /* Make sure that we have enough room for our number of entries field. */
   if (frame->length < 4) {
     expert_add_info_format(pinfo, frame_tree, PI_MALFORMED, PI_ERROR,
@@ -1275,6 +1282,47 @@ static int dissect_spdy_settings_payload(
 
   return frame->length;
 }
+
+static int dissect_spdy_goaway_payload(tvbuff_t *tvb,
+                                       int offset,
+                                       packet_info *pinfo,
+                                       proto_tree *frame_tree,
+                                       const spdy_control_frame_info_t *frame) {
+  guint32 goaway_status;
+
+  /* Get last good stream ID and add to info column and tree. */
+  dissect_spdy_stream_id_field(tvb, offset, pinfo, frame_tree,
+                               hf_spdy_goaway_last_good_stream_id);
+  offset += 4;
+
+  /* Get status. */
+  goaway_status = tvb_get_ntohl(tvb, offset);
+  if (match_strval(goaway_status, goaway_status_names) == NULL) {
+    /* Handle boundary conditions. */
+    expert_add_info_format(pinfo, frame_tree, PI_PROTOCOL, PI_ERROR,
+                           "Invalid status code for GOAWAY: %u",
+                           goaway_status);
+  }
+
+  /* Add status to info column. */
+  col_append_fstr(pinfo->cinfo,
+                  COL_INFO,
+                  ", (Status: %s)",
+                  val_to_str(goaway_status,
+                             rst_stream_status_names,
+                             "Unknown (%d)"));
+
+  /* Add proto item for goaway_status. */
+  proto_tree_add_item(frame_tree,
+                      hf_spdy_goaway_status,
+                      tvb,
+                      offset,
+                      4,
+                      ENC_BIG_ENDIAN);
+
+  return frame->length;
+}
+
 
 /*
  * Performs header decompression.
@@ -1659,8 +1707,10 @@ int dissect_spdy_frame(tvbuff_t *tvb,
       break;
 
     case SPDY_GOAWAY:
-      /* TODO(hkhalil): Show last-good-stream-ID (31 bits). */
-      /* TODO(hkhalil): Show status code (32 bits). */
+      if (0 > dissect_spdy_goaway_payload(tvb, offset, pinfo, spdy_tree,
+                                          &frame)) {
+        return -1;
+      }
       break;
 
     case SPDY_WINDOW_UPDATE:
@@ -2170,6 +2220,18 @@ void proto_register_spdy(void) {
     { &hf_spdy_setting_value,
       { "Value",          "spdy.setting.value",
           FT_UINT32, BASE_DEC, NULL, 0x0,
+          "", HFILL
+      }
+    },
+    { &hf_spdy_goaway_last_good_stream_id,
+      { "Last Good Stream ID", "spdy.goaway_last_good_stream_id",
+          FT_UINT32, BASE_DEC, NULL, 0x0,
+          "", HFILL
+      }
+    },
+    { &hf_spdy_goaway_status,
+      { "Go Away Status", "spdy.goaway_status",
+          FT_UINT32, BASE_DEC, VALS(goaway_status_names), 0x0,
           "", HFILL
       }
     },
