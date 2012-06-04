@@ -1075,6 +1075,56 @@ body_dissected:
   return frame->length;
 }
 
+static int dissect_spdy_rst_stream_payload(
+    tvbuff_t *tvb,
+    int offset,
+    packet_info *pinfo,
+    proto_tree *frame_tree,
+    const spdy_control_frame_info_t *frame) {
+  guint32 stream_id;
+  guint32 rst_status;
+
+  /* Get stream ID and add to info column and tree. */
+  stream_id = tvb_get_bits32(tvb, (offset * 8) + 1, 31, ENC_NA);
+  col_append_fstr(pinfo->cinfo, COL_INFO, ", (Stream: %d)", stream_id);
+  if (frame_tree) {
+    proto_tree_add_item(frame_tree,
+                        hf_spdy_streamid,
+                        tvb,
+                        offset,
+                        4,
+                        ENC_BIG_ENDIAN);
+  }
+  offset += 4;
+
+  /* Get status. */
+  rst_status = tvb_get_ntohl(tvb, offset);
+  if (match_strval(rst_status, rst_stream_status_names) == NULL) {
+    /* Handle boundary conditions. */
+    expert_add_info_format(pinfo, frame_tree, PI_PROTOCOL, PI_ERROR,
+                           "Invalid status code for RST_STREAM: %u",
+                           rst_status);
+  }
+
+  /* Add status to info column. */
+  col_append_fstr(pinfo->cinfo,
+                  COL_INFO,
+                  ", (Status: %s)",
+                  val_to_str(rst_status,
+                             rst_stream_status_names,
+                             "Unknown (%d)"));
+
+  /* Add proto item for rst_status. */
+  proto_tree_add_item(frame_tree,
+                      hf_spdy_rst_stream_status,
+                      tvb,
+                      offset,
+                      4,
+                      ENC_BIG_ENDIAN);
+
+  return frame->length;
+}
+
 static int dissect_spdy_settings_payload(
     tvbuff_t *tvb,
     int offset,
@@ -1190,56 +1240,6 @@ static int dissect_spdy_settings_payload(
     /* Add description end. */
     proto_item_append_text(frame_tree, "]");
   }
-
-  return frame->length;
-}
-
-static int dissect_spdy_rst_stream_payload(
-    tvbuff_t *tvb,
-    int offset,
-    packet_info *pinfo,
-    proto_tree *frame_tree,
-    const spdy_control_frame_info_t *frame) {
-  guint32 stream_id;
-  guint32 rst_status;
-
-  /* Get stream ID and add to info column and tree. */
-  stream_id = tvb_get_bits32(tvb, (offset * 8) + 1, 31, ENC_NA);
-  col_append_fstr(pinfo->cinfo, COL_INFO, ", (Stream: %d)", stream_id);
-  if (frame_tree) {
-    proto_tree_add_item(frame_tree,
-                        hf_spdy_streamid,
-                        tvb,
-                        offset,
-                        4,
-                        ENC_BIG_ENDIAN);
-  }
-  offset += 4;
-
-  /* Get status. */
-  rst_status = tvb_get_ntohl(tvb, offset);
-  if (match_strval(rst_status, rst_stream_status_names) == NULL) {
-    /* Handle boundary conditions. */
-    expert_add_info_format(pinfo, frame_tree, PI_PROTOCOL, PI_ERROR,
-                           "Invalid status code for RST_STREAM: %u",
-                           rst_status);
-  }
-
-  /* Add status to info column. */
-  col_append_fstr(pinfo->cinfo,
-                  COL_INFO,
-                  ", (Status: %s)",
-                  val_to_str(rst_status,
-                             rst_stream_status_names,
-                             "Unknown (%d)"));
-
-  /* Add proto item for rst_status. */
-  proto_tree_add_item(frame_tree,
-                      hf_spdy_rst_stream_status,
-                      tvb,
-                      offset,
-                      4,
-                      ENC_BIG_ENDIAN);
 
   return frame->length;
 }
