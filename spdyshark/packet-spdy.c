@@ -1766,12 +1766,14 @@ static int dissect_spdy_goaway_payload(tvbuff_t *tvb,
                              "Unknown (%d)"));
 
   /* Add proto item for goaway_status. */
-  proto_tree_add_item(frame_tree,
-                      hf_spdy_goaway_status,
-                      tvb,
-                      offset,
-                      4,
-                      ENC_BIG_ENDIAN);
+  if (frame_tree) {
+    proto_tree_add_item(frame_tree,
+                        hf_spdy_goaway_status,
+                        tvb,
+                        offset,
+                        4,
+                        ENC_BIG_ENDIAN);
+  }
 
   return frame->length;
 }
