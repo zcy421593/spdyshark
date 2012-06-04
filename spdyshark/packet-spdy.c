@@ -745,6 +745,48 @@ static void dissect_spdy_control_bit(tvbuff_t *tvb,
   }
 }
 
+static guint32 get_spdy_stream_id(tvbuff_t* tvb, int offset) {
+  return tvb_get_bits32(tvb, (offset * 8) + 1, 31, ENC_BIG_ENDIAN);
+}
+
+/*
+ * Same as dissect_spdy_stream_id below, except with explicit field index.
+ */
+static void dissect_spdy_stream_id_field(tvbuff_t *tvb,
+                                         int offset,
+                                         packet_info *pinfo,
+                                         proto_tree *frame_tree,
+                                         const int hfindex) {
+  guint32 stream_id = get_spdy_stream_id(tvb, offset);
+  /* Add stream id to info column. */
+  if (hfindex == hf_spdy_streamid) {
+    col_append_fstr(pinfo->cinfo, COL_INFO, " Stream=%u", stream_id);
+  }
+
+  /* Add stream id to tree. */
+  if (frame_tree) {
+    proto_tree_add_item(frame_tree,
+                        hfindex,
+                        tvb,
+                        offset,
+                        4,
+                        ENC_BIG_ENDIAN);
+    if (hfindex == hf_spdy_streamid) {
+      proto_item_append_text(frame_tree, ", Stream: %u", stream_id);
+    }
+  }
+}
+
+/*
+ * Adds stream ID details to proto tree.
+ */
+static void dissect_spdy_stream_id(tvbuff_t *tvb,
+                                   int offset,
+                                   packet_info *pinfo,
+                                   proto_tree *frame_tree) {
+  dissect_spdy_stream_id_field(tvb, offset,pinfo, frame_tree, hf_spdy_streamid);
+}
+
 /*
  * Adds flag details to proto tree.
  */
@@ -1081,20 +1123,10 @@ static int dissect_spdy_rst_stream_payload(
     packet_info *pinfo,
     proto_tree *frame_tree,
     const spdy_control_frame_info_t *frame) {
-  guint32 stream_id;
   guint32 rst_status;
 
   /* Get stream ID and add to info column and tree. */
-  stream_id = tvb_get_bits32(tvb, (offset * 8) + 1, 31, ENC_NA);
-  col_append_fstr(pinfo->cinfo, COL_INFO, ", (Stream: %d)", stream_id);
-  if (frame_tree) {
-    proto_tree_add_item(frame_tree,
-                        hf_spdy_streamid,
-                        tvb,
-                        offset,
-                        4,
-                        ENC_BIG_ENDIAN);
-  }
+  dissect_spdy_stream_id(tvb, offset, pinfo, frame_tree);
   offset += 4;
 
   /* Get status. */
@@ -1408,7 +1440,6 @@ int dissect_spdy_frame(tvbuff_t *tvb,
   guint8              control_bit;
   spdy_control_frame_info_t frame;
   guint32             stream_id = 0;
-  guint32             associated_stream_id = 0;
   gint                priority = 0;
   guint32             num_headers = 0;
   guint32             ping_id;
@@ -1501,7 +1532,7 @@ int dissect_spdy_frame(tvbuff_t *tvb,
     frame.version = 0; /* Version doesn't apply to DATA. */
 
     /* Add stream ID. */
-    stream_id = tvb_get_bits32(tvb, (offset * 8) + 1, 31, ENC_BIG_ENDIAN);
+    stream_id = get_spdy_stream_id(tvb, offset);
     if (spdy_tree) {
       proto_tree_add_item(spdy_tree,
                           hf_spdy_streamid,
@@ -1578,31 +1609,15 @@ int dissect_spdy_frame(tvbuff_t *tvb,
     case SPDY_SYN_STREAM:
     case SPDY_SYN_REPLY:
     case SPDY_HEADERS:
-      /* Get stream id. */
-      stream_id = tvb_get_bits32(tvb, (offset << 3) + 1, 31, FALSE);
+      stream_id = get_spdy_stream_id(tvb, offset);
+      dissect_spdy_stream_id(tvb, offset, pinfo, spdy_tree);
       offset += 4;
-      if (tree) {
-        proto_tree_add_item(spdy_tree,
-                            hf_spdy_streamid,
-                            tvb,
-                            offset,
-                            4,
-                            ENC_BIG_ENDIAN);
-      }
 
       /* Get SYN_STREAM-only fields. */
       if (frame.type == SPDY_SYN_STREAM) {
         /* Get associated stream ID. */
-        associated_stream_id = tvb_get_bits32(tvb, (offset << 3) + 1, 31,
-                                              FALSE);
-        if (spdy_tree) {
-          proto_tree_add_item(spdy_tree,
-                              hf_spdy_associated_streamid,
-                              tvb,
-                              offset,
-                              4,
-                              ENC_BIG_ENDIAN);
-        }
+        dissect_spdy_stream_id_field(tvb, offset, pinfo, spdy_tree,
+                                     hf_spdy_associated_streamid);
         offset += 4;
 
         /* Get priority */
@@ -1617,9 +1632,6 @@ int dissect_spdy_frame(tvbuff_t *tvb,
         }
         offset += 2;
       }
-
-      /* Add to info column. */
-      col_append_fstr(pinfo->cinfo, COL_INFO, "[%u]", stream_id);
 
       break;
 
@@ -1653,15 +1665,15 @@ int dissect_spdy_frame(tvbuff_t *tvb,
 
     case SPDY_WINDOW_UPDATE:
       /* Get stream ID. */
-      stream_id = tvb_get_bits32(tvb, (offset << 3) + 1, 31, FALSE);
+      dissect_spdy_stream_id(tvb, offset, pinfo, spdy_tree);
       offset += 4;
 
       /* Get window update delta. */
       window_update_delta = tvb_get_bits32(tvb, (offset << 3) + 1, 31, FALSE);
       offset += 4;
 
-      /* Add to info column. */
-      col_append_fstr(pinfo->cinfo, COL_INFO, "[%u] Delta=%u", stream_id,
+      /* Add to delta to info column. */
+      col_append_fstr(pinfo->cinfo, COL_INFO, ", Delta=%u",
                       window_update_delta);
       break;
 
