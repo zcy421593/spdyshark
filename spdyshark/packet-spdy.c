@@ -218,6 +218,7 @@ static int hf_spdy_setting_value = -1;
 static int hf_spdy_ping_id = -1;
 static int hf_spdy_goaway_last_good_stream_id = -1;
 static int hf_spdy_goaway_status = -1;
+static int hf_spdy_window_update_delta = -1;
 
 static gint ett_spdy = -1;
 static gint ett_spdy_flags = -1;
@@ -1778,6 +1779,40 @@ static int dissect_spdy_goaway_payload(tvbuff_t *tvb,
   return frame->length;
 }
 
+static int dissect_spdy_window_update_payload(
+    tvbuff_t *tvb,
+    int offset,
+    packet_info *pinfo,
+    proto_tree *frame_tree,
+    const spdy_control_frame_info_t *frame) {
+  guint32             window_update_delta;
+
+  /* Get stream ID. */
+  dissect_spdy_stream_id(tvb, offset, pinfo, frame_tree);
+  offset += 4;
+
+  /* Get window update delta. */
+  window_update_delta = tvb_get_bits32(tvb, (offset * 8) + 1, 31, FALSE);
+
+  /* Add proto item for window update delta. */
+  if (frame_tree) {
+    proto_tree_add_item(frame_tree,
+                        hf_spdy_window_update_delta,
+                        tvb,
+                        offset,
+                        4,
+                        ENC_BIG_ENDIAN);
+    proto_item_append_text(frame_tree, ", Delta: %u", window_update_delta);
+  }
+  offset += 4;
+
+  /* Add delta to info column. */
+  col_append_fstr(pinfo->cinfo, COL_INFO, " Delta=%u",
+                      window_update_delta);
+
+  return frame->length;
+}
+
 /*
  * Performs SPDY frame dissection.
  * TODO(hkhalil): Refactor!
@@ -1790,7 +1825,6 @@ int dissect_spdy_frame(tvbuff_t *tvb,
   guint8              control_bit;
   spdy_control_frame_info_t frame;
   guint32             stream_id = 0;
-  guint32             window_update_delta;
   const char          *frame_type_name;
   proto_tree          *spdy_tree = NULL;
   proto_item          *spdy_proto = NULL;
@@ -1982,17 +2016,10 @@ int dissect_spdy_frame(tvbuff_t *tvb,
       break;
 
     case SPDY_WINDOW_UPDATE:
-      /* Get stream ID. */
-      dissect_spdy_stream_id(tvb, offset, pinfo, spdy_tree);
-      offset += 4;
-
-      /* Get window update delta. */
-      window_update_delta = tvb_get_bits32(tvb, (offset << 3) + 1, 31, FALSE);
-      offset += 4;
-
-      /* Add to delta to info column. */
-      col_append_fstr(pinfo->cinfo, COL_INFO, ", Delta=%u",
-                      window_update_delta);
+      if (0 > dissect_spdy_window_update_payload(tvb, offset, pinfo, spdy_tree,
+                                                 &frame)) {
+        return -1;
+      }
       break;
 
     case SPDY_CREDENTIAL:
@@ -2282,6 +2309,12 @@ void proto_register_spdy(void) {
       { "Go Away Status", "spdy.goaway_status",
           FT_UINT32, BASE_DEC, VALS(goaway_status_names), 0x0,
           "", HFILL
+      }
+    },
+    { &hf_spdy_window_update_delta,
+      { "Window Update Delta", "spdy.window_update_delta",
+          FT_UINT32, BASE_DEC, NULL, 0x0,
+          NULL, HFILL
       }
     },
   };
