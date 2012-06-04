@@ -1595,7 +1595,6 @@ static int dissect_spdy_settings_payload(
                                offset,
                                8,
                                ENC_NA);
-      /* TODO(hkhalil): Prettier output for setting sub-tree description. */
       setting_tree = proto_item_add_subtree(ti, ett_spdy_setting);
     }
 
@@ -1646,6 +1645,8 @@ static int dissect_spdy_settings_payload(
                           offset,
                           4,
                           ENC_BIG_ENDIAN);
+      proto_item_set_text(setting_tree, "Setting, %s: %u", setting_id_str,
+                          setting_value);
       proto_item_append_text(frame_tree, ", %s: %u", setting_id_str,
                              setting_value);
     }
