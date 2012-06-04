@@ -215,6 +215,7 @@ static int hf_spdy_num_settings = -1;
 static int hf_spdy_setting = -1;
 static int hf_spdy_setting_id = -1;
 static int hf_spdy_setting_value = -1;
+static int hf_spdy_ping_id = -1;
 static int hf_spdy_goaway_last_good_stream_id = -1;
 static int hf_spdy_goaway_status = -1;
 
@@ -1710,6 +1711,31 @@ static int dissect_spdy_settings_payload(
   return frame->length;
 }
 
+static int dissect_spdy_ping_payload(tvbuff_t *tvb,
+                                     int offset,
+                                     packet_info *pinfo,
+                                     proto_tree *frame_tree,
+                                     const spdy_control_frame_info_t *frame) {
+  /* Get ping ID. */
+  guint32 ping_id = tvb_get_ntohl(tvb, offset);
+
+  /* Add proto item for ping ID. */
+  if (frame_tree) {
+    proto_tree_add_item(frame_tree,
+                        hf_spdy_ping_id,
+                        tvb,
+                        offset,
+                        4,
+                        ENC_BIG_ENDIAN);
+  }
+  offset += 4;
+
+  /* Add ping ID to info column. */
+  col_append_fstr(pinfo->cinfo, COL_INFO, " ID=%u", ping_id);
+
+  return frame->length;
+}
+
 static int dissect_spdy_goaway_payload(tvbuff_t *tvb,
                                        int offset,
                                        packet_info *pinfo,
@@ -1762,7 +1788,6 @@ int dissect_spdy_frame(tvbuff_t *tvb,
   guint8              control_bit;
   spdy_control_frame_info_t frame;
   guint32             stream_id = 0;
-  guint32             ping_id;
   guint32             window_update_delta;
   const char          *proto_tag;
   const char          *frame_type_name;
@@ -1943,9 +1968,10 @@ int dissect_spdy_frame(tvbuff_t *tvb,
       break;
 
     case SPDY_PING:
-      ping_id = tvb_get_ntohl(tvb, offset);
-      offset += 4;
-      col_append_fstr(pinfo->cinfo, COL_INFO, " ID=%u", ping_id);
+      if (0 > dissect_spdy_ping_payload(tvb, offset, pinfo, spdy_tree,
+                                        &frame)) {
+        return -1;
+      }
       break;
 
     case SPDY_GOAWAY:
@@ -2238,6 +2264,12 @@ void proto_register_spdy(void) {
       { "Value",          "spdy.setting.value",
           FT_UINT32, BASE_DEC, NULL, 0x0,
           "", HFILL
+      }
+    },
+    { &hf_spdy_ping_id,
+      { "Ping ID",        "spdy.ping_id",
+          FT_UINT24, BASE_DEC, NULL, 0x0,
+          NULL, HFILL
       }
     },
     { &hf_spdy_goaway_last_good_stream_id,
