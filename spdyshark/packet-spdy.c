@@ -1575,7 +1575,7 @@ static int dissect_spdy_rst_stream_payload(
   /* Add status to info column. */
   col_append_fstr(pinfo->cinfo,
                   COL_INFO,
-                  ", (Status: %s)",
+                  " Status=%s)",
                   val_to_str(rst_status,
                              rst_stream_status_names,
                              "Unknown (%d)"));
@@ -1765,7 +1765,7 @@ static int dissect_spdy_goaway_payload(tvbuff_t *tvb,
   /* Add status to info column. */
   col_append_fstr(pinfo->cinfo,
                   COL_INFO,
-                  ", (Status: %s)",
+                  " Status=%s)",
                   val_to_str(goaway_status,
                              rst_stream_status_names,
                              "Unknown (%d)"));
