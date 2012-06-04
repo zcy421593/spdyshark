@@ -884,12 +884,12 @@ static int dissect_spdy_data_payload(tvbuff_t *tvb,
   guint num_data_frames;
   gboolean dissected;
 
-  col_add_fstr(pinfo->cinfo, COL_INFO, "DATA[%u] length=%d",
+  col_add_fstr(pinfo->cinfo, COL_INFO, "DATA Stream=%d Length=%d",
                stream_id, frame->length);
 
   if (spdy_tree) {
     /* Add frame description. */
-    proto_item_append_text(spdy_proto, " stream=%d length=%d",
+    proto_item_append_text(spdy_proto, ", Stream: %d, Length: %d",
                            stream_id,
                            frame->length);
 
@@ -1584,12 +1584,19 @@ static int dissect_spdy_rst_stream_payload(
                              "Unknown (%d)"));
 
   /* Add proto item for rst_status. */
-  proto_tree_add_item(frame_tree,
-                      hf_spdy_rst_stream_status,
-                      tvb,
-                      offset,
-                      4,
-                      ENC_BIG_ENDIAN);
+  if (frame_tree) {
+    proto_tree_add_item(frame_tree,
+                        hf_spdy_rst_stream_status,
+                        tvb,
+                        offset,
+                        4,
+                        ENC_BIG_ENDIAN);
+    proto_item_append_text(frame_tree,
+                           ", Status: %s",
+                           val_to_str(rst_status,
+                                      rst_stream_status_names,
+                                      "Unknown (%d)"));
+  }
 
   return frame->length;
 }
@@ -1632,81 +1639,80 @@ static int dissect_spdy_settings_payload(
   offset += 4;
 
   /* Dissect each entry. */
-  if (num_entries > 0) {
-    /* Add description start. */
-    proto_item_append_text(frame_tree, " [");
+  while (num_entries > 0) {
+    const gchar *setting_id_str;
+    guint32 setting_value;
 
-    while (num_entries > 0) {
-      if (frame_tree) {
-        /* Create key/value pair subtree. */
-        ti = proto_tree_add_item(frame_tree,
-                                 hf_spdy_setting,
-                                 tvb,
-                                 offset,
-                                 8,
-                                 ENC_NA);
-        /* TODO(hkhalil): Prettier output for setting sub-tree description. */
-        setting_tree = proto_item_add_subtree(ti, ett_spdy_setting);
-
-        /* Set flags. */
-        ti = proto_tree_add_item(setting_tree,
-                                 hf_spdy_flags,
-                                 tvb,
-                                 offset,
-                                 1,
-                                 ENC_NA);
-        /* TODO(hkhalil): Prettier output for flags sub-tree description. */
-        flags_tree = proto_item_add_subtree(ti, ett_spdy_flags);
-        proto_tree_add_item(flags_tree,
-                            hf_spdy_flags_persist_value,
-                            tvb,
-                            offset,
-                            1,
-                            ENC_BIG_ENDIAN);
-        proto_tree_add_item(flags_tree,
-                            hf_spdy_flags_persisted,
-                            tvb,
-                            offset,
-                            1,
-                            ENC_BIG_ENDIAN);
-        offset += 1;
-
-        /* Set ID. */
-        proto_tree_add_item(setting_tree,
-                            hf_spdy_setting_id,
-                            tvb,
-                            offset,
-                            3,
-                            ENC_BIG_ENDIAN);
-        proto_item_append_text(frame_tree,
-                               "%s",
-                               val_to_str(tvb_get_ntoh24(tvb, offset),
-                                          setting_id_names,
-                                          "Unknown(%d)"));
-        if (num_entries != 1) {
-          proto_item_append_text(frame_tree, ", ");
-        }
-        offset += 3;
-
-        /* Set Value. */
-        proto_tree_add_item(setting_tree,
-                            hf_spdy_setting_value,
-                            tvb,
-                            offset,
-                            4,
-                            ENC_BIG_ENDIAN);
-        offset += 4;
-
-      } else {
-        offset += 8;
-      }
-
-      /* Increment. */
-      --num_entries;
+    if (frame_tree) {
+      /* Create key/value pair subtree. */
+      ti = proto_tree_add_item(frame_tree,
+                               hf_spdy_setting,
+                               tvb,
+                               offset,
+                               8,
+                               ENC_NA);
+      /* TODO(hkhalil): Prettier output for setting sub-tree description. */
+      setting_tree = proto_item_add_subtree(ti, ett_spdy_setting);
     }
 
-    /* Add description end. */
-    proto_item_append_text(frame_tree, "]");
+    /* Set flags. */
+    if (frame_tree) {
+      ti = proto_tree_add_item(setting_tree,
+                               hf_spdy_flags,
+                               tvb,
+                               offset,
+                               1,
+                               ENC_NA);
+      /* TODO(hkhalil): Prettier output for flags sub-tree description. */
+      flags_tree = proto_item_add_subtree(ti, ett_spdy_flags);
+      proto_tree_add_item(flags_tree,
+                          hf_spdy_flags_persist_value,
+                          tvb,
+                          offset,
+                          1,
+                          ENC_BIG_ENDIAN);
+      proto_tree_add_item(flags_tree,
+                          hf_spdy_flags_persisted,
+                          tvb,
+                          offset,
+                          1,
+                          ENC_BIG_ENDIAN);
+    }
+    offset += 1;
+
+    /* Set ID. */
+    setting_id_str = val_to_str(tvb_get_ntoh24(tvb, offset), setting_id_names,
+                                "Unknown(%d)");
+    if (frame_tree) {
+      proto_tree_add_item(setting_tree,
+                          hf_spdy_setting_id,
+                          tvb,
+                          offset,
+                          3,
+                          ENC_BIG_ENDIAN);
+    }
+    offset += 3;
+
+    /* Set Value. */
+    setting_value = tvb_get_ntohl(tvb, offset);
+    if (frame_tree) {
+      proto_tree_add_item(setting_tree,
+                          hf_spdy_setting_value,
+                          tvb,
+                          offset,
+                          4,
+                          ENC_BIG_ENDIAN);
+      proto_item_append_text(frame_tree, ", %s: %u", setting_id_str,
+                             setting_value);
+    }
+    offset += 4;
+
+    /* Append to info column. */
+    col_append_fstr(pinfo->cinfo, COL_INFO, " %s=%u", setting_id_str,
+                    setting_value);
+
+    /* Increment. */
+    --num_entries;
   }
 
   return frame->length;
@@ -1728,6 +1734,7 @@ static int dissect_spdy_ping_payload(tvbuff_t *tvb,
                         offset,
                         4,
                         ENC_BIG_ENDIAN);
+    proto_item_append_text(frame_tree, ", ID: %u", ping_id);
   }
   offset += 4;
 
