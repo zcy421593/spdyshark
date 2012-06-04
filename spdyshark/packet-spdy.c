@@ -249,67 +249,6 @@ static gboolean spdy_decompress_headers = FALSE;
 #endif
 static gboolean spdy_debug = FALSE;
 
-static const value_string vals_status_code[] = {
-    { 100, "Continue" },
-    { 101, "Switching Protocols" },
-    { 102, "Processing" },
-    { 199, "Informational - Others" },
-
-    { 200, "OK"},
-    { 201, "Created"},
-    { 202, "Accepted"},
-    { 203, "Non-authoritative Information"},
-    { 204, "No Content"},
-    { 205, "Reset Content"},
-    { 206, "Partial Content"},
-    { 207, "Multi-Status"},
-    { 299, "Success - Others"},
-
-    { 300, "Multiple Choices"},
-    { 301, "Moved Permanently"},
-    { 302, "Found"},
-    { 303, "See Other"},
-    { 304, "Not Modified"},
-    { 305, "Use Proxy"},
-    { 307, "Temporary Redirect"},
-    { 399, "Redirection - Others"},
-
-    { 400, "Bad Request"},
-    { 401, "Unauthorized"},
-    { 402, "Payment Required"},
-    { 403, "Forbidden"},
-    { 404, "Not Found"},
-    { 405, "Method Not Allowed"},
-    { 406, "Not Acceptable"},
-    { 407, "Proxy Authentication Required"},
-    { 408, "Request Time-out"},
-    { 409, "Conflict"},
-    { 410, "Gone"},
-    { 411, "Length Required"},
-    { 412, "Precondition Failed"},
-    { 413, "Request Entity Too Large"},
-    { 414, "Request-URI Too Long"},
-    { 415, "Unsupported Media Type"},
-    { 416, "Requested Range Not Satisfiable"},
-    { 417, "Expectation Failed"},
-    { 418, "I'm a teapot"},         /* RFC 2324 */
-    { 422, "Unprocessable Entity"},
-    { 423, "Locked"},
-    { 424, "Failed Dependency"},
-    { 499, "Client Error - Others"},
-
-    { 500, "Internal Server Error"},
-    { 501, "Not Implemented"},
-    { 502, "Bad Gateway"},
-    { 503, "Service Unavailable"},
-    { 504, "Gateway Time-out"},
-    { 505, "HTTP Version not supported"},
-    { 507, "Insufficient Storage"},
-    { 599, "Server Error - Others"},
-
-    { 0,    NULL}
-};
-
 static const char spdy_dictionary[] = {
   0x00, 0x00, 0x00, 0x07, 0x6f, 0x70, 0x74, 0x69,  // - - - - o p t i
   0x6f, 0x6e, 0x73, 0x00, 0x00, 0x00, 0x04, 0x68,  // o n s - - - - h
@@ -1287,9 +1226,12 @@ static int dissect_spdy_header_payload(
   int header_block_length = frame->length;
   int hdr_offset = 0;
   tvbuff_t *header_tvb = NULL;
-  gchar *hdr_verb = NULL;
-  gchar *hdr_url = NULL;
+  gchar *hdr_method = NULL;
+  gchar *hdr_path = NULL;
   gchar *hdr_version = NULL;
+  gchar *hdr_host = NULL;
+  gchar *hdr_scheme = NULL;
+  gchar *hdr_status = NULL;
   gchar *content_type = NULL;
   gchar *content_encoding = NULL;
   guint32 num_headers = 0;
@@ -1449,7 +1391,6 @@ static int dissect_spdy_header_payload(
   }
 
   /* Process headers. */
-  hdr_verb = hdr_url = hdr_version = content_type = content_encoding = NULL;
   while (num_headers-- &&
          tvb_length_remaining(header_tvb, hdr_offset) != 0) {
     gchar *header_name;
@@ -1513,28 +1454,34 @@ static int dissect_spdy_header_payload(
     /*
      * TODO(ers) check that the header name contains only legal characters.
      */
-    if (g_ascii_strcasecmp(header_name, "method") == 0 ||
-      g_ascii_strcasecmp(header_name, "status") == 0) {
-      hdr_verb = header_value;
-    } else if (g_ascii_strcasecmp(header_name, "url") == 0) {
-      hdr_url = header_value;
-    } else if (g_ascii_strcasecmp(header_name, "version") == 0) {
+    /* TODO(hkhalil): Make sure that prohibited headers aren't sent. */
+    if (g_strcmp0(header_name, ":method") == 0) {
+      hdr_method = header_value;
+    } else if (g_strcmp0(header_name, ":path") == 0) {
+      hdr_path = header_value;
+    } else if (g_strcmp0(header_name, ":version") == 0) {
       hdr_version = header_value;
-    } else if (g_ascii_strcasecmp(header_name, "content-type") == 0) {
+    } else if (g_strcmp0(header_name, ":host") == 0) {
+      hdr_host = header_value;
+    } else if (g_strcmp0(header_name, ":scheme") == 0) {
+      hdr_scheme = header_value;
+    } else if (g_strcmp0(header_name, ":status") == 0) {
+      hdr_status = header_value;
+    } else if (g_strcmp0(header_name, "content-type") == 0) {
       content_type = se_strdup(header_value);
-    } else if (g_ascii_strcasecmp(header_name, "content-encoding") == 0) {
+    } else if (g_strcmp0(header_name, "content-encoding") == 0) {
       content_encoding = se_strdup(header_value);
     }
   }
 
   /* Set Info column. */
   if (hdr_version != NULL) {
-    if (hdr_url != NULL) {
-      col_append_fstr(pinfo->cinfo, COL_INFO, ": %s %s %s",
-                      hdr_verb, hdr_url, hdr_version);
+    if (hdr_status == NULL) {
+      col_append_fstr(pinfo->cinfo, COL_INFO, " Request=\"%s %s://%s%s %s\"",
+                      hdr_method, hdr_scheme, hdr_host, hdr_path, hdr_version);
     } else {
-      col_append_fstr(pinfo->cinfo, COL_INFO, ": %s %s",
-                   hdr_verb, hdr_version);
+      col_append_fstr(pinfo->cinfo, COL_INFO, " Response=\"%s %s\"",
+                      hdr_status, hdr_version);
     }
   }
 
