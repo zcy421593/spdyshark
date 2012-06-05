@@ -1226,12 +1226,12 @@ static int dissect_spdy_header_payload(
   int header_block_length = frame->length;
   int hdr_offset = 0;
   tvbuff_t *header_tvb = NULL;
-  gchar *hdr_method = NULL;
-  gchar *hdr_path = NULL;
-  gchar *hdr_version = NULL;
-  gchar *hdr_host = NULL;
-  gchar *hdr_scheme = NULL;
-  gchar *hdr_status = NULL;
+  const gchar *hdr_method = NULL;
+  const gchar *hdr_path = NULL;
+  const gchar *hdr_version = NULL;
+  const gchar *hdr_host = NULL;
+  const gchar *hdr_scheme = NULL;
+  const gchar *hdr_status = NULL;
   gchar *content_type = NULL;
   gchar *content_encoding = NULL;
   guint32 num_headers = 0;
@@ -1380,43 +1380,52 @@ static int dissect_spdy_header_payload(
   }
   hdr_offset += 4;
 
-  /* TODO(hkhalil): Remove this escape hatch, process headers as possible. */
-  if (num_headers > frame->length) {
-    expert_add_info_format(pinfo, frame_tree, PI_MALFORMED, PI_ERROR,
-                           "Number of headers is greater than frame length!");
-    proto_item_append_text(ti,
-                           " [Error: Number of headers is larger than "
-                           "frame length]");
-    return frame->length;
-  }
-
   /* Process headers. */
-  while (num_headers-- &&
-         tvb_length_remaining(header_tvb, hdr_offset) != 0) {
+  while (num_headers--) {
     gchar *header_name;
-    gchar *header_value;
+    const gchar *header_value;
     proto_tree *header_tree;
     proto_item *header;
     proto_item *header_name_ti;
     proto_item *header_value_ti;
     int header_name_offset;
     int header_value_offset;
-    guint32 header_name_length;
-    guint32 header_value_length;
+    int header_name_length;
+    int header_value_length;
 
     /* Get header name details. */
+    if (tvb_length_remaining(header_tvb, hdr_offset) < 4) {
+      expert_add_info_format(pinfo, frame_tree, PI_MALFORMED, PI_ERROR,
+                             "Not enough frame data for header name size.");
+      break;
+    }
     header_name_offset = hdr_offset;
     header_name_length = tvb_get_ntohl(header_tvb, hdr_offset);
     hdr_offset += 4;
+    if (tvb_length_remaining(header_tvb, hdr_offset) < header_name_length) {
+      expert_add_info_format(pinfo, frame_tree, PI_MALFORMED, PI_ERROR,
+                             "Not enough frame data for header name.");
+      break;
+    }
     header_name = (gchar *)tvb_get_ephemeral_string(header_tvb,
                                                     hdr_offset,
                                                     header_name_length);
     hdr_offset += header_name_length;
 
     /* Get header value details. */
+    if (tvb_length_remaining(header_tvb, hdr_offset) < 4) {
+      expert_add_info_format(pinfo, frame_tree, PI_MALFORMED, PI_ERROR,
+                             "Not enough frame data for header value size.");
+      break;
+    }
     header_value_offset = hdr_offset;
     header_value_length = tvb_get_ntohl(header_tvb, hdr_offset);
     hdr_offset += 4;
+    if (tvb_length_remaining(header_tvb, hdr_offset) < header_value_length) {
+      expert_add_info_format(pinfo, frame_tree, PI_MALFORMED, PI_ERROR,
+                             "Not enough frame data for header value.");
+      break;
+    }
     header_value = (gchar *)tvb_get_ephemeral_string(header_tvb,
                                                      hdr_offset,
                                                      header_value_length);
@@ -1442,7 +1451,7 @@ static int dissect_spdy_header_payload(
                                            4,
                                            ENC_NA);
 
-      /* Add 'Value' subtree with descriptive text. */
+      /* Add header value. */
       header_value_ti = proto_tree_add_item(header_tree,
                                             hf_spdy_header_value,
                                             header_tvb,
@@ -1767,7 +1776,6 @@ static int dissect_spdy_window_update_payload(
 
 /*
  * Performs SPDY frame dissection.
- * TODO(hkhalil): Refactor!
  */
 int dissect_spdy_frame(tvbuff_t *tvb,
                        int offset,
